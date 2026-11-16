@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>내 검수 | flawmap</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/service/service.css">
+</head>
+<body>
+<header class="top" id="top"></header>
+<main class="wrap">
+  <section class="status-head">
+    <div>
+      <h1 id="title">검수</h1>
+      <p class="muted" id="sub"></p>
+    </div>
+    <p class="small muted" style="max-width:320px">이 화면의 주소는 검수를 요청한 사람만 갖고 있습니다. 북마크해 두면 언제든 다시 들어올 수 있습니다.</p>
+  </section>
+
+  <section id="progressSec" hidden>
+    <h2 id="progressHead">처리하고 있습니다</h2>
+    <p class="muted" id="progressNote"></p>
+    <div class="bar" style="max-width:560px"><i id="progressBar" style="width:0%"></i></div>
+    <ol class="timeline" id="timeline"></ol>
+  </section>
+
+  <section id="failSec" hidden>
+    <div class="notice bad" id="failBox"></div>
+    <div class="actions" style="margin-top:16px"><a class="btn" id="retryLink" href="/new">다시 찍어 올리기</a></div>
+  </section>
+
+  <section id="doneSec" hidden>
+    <div class="notice" id="superseded" hidden></div>
+    <div class="result">
+      <div id="tag"></div>
+      <div>
+        <h2>찾은 하자</h2>
+        <ul class="dlist" id="dlist"></ul>
+        <div class="actions" style="margin-top:18px"><a class="btn" id="viewLink" href="#">3D 결과 열기</a></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="adviceSec" hidden>
+    <h2>더 찍으면 좋은 곳</h2>
+    <ul class="advice" id="advice"></ul>
+  </section>
+
+  <section id="publishSec" hidden>
+    <h2>결과 나누기</h2>
+    <p class="muted">링크를 받은 사람은 이 결과를 읽기 전용으로 봅니다. 결과 내용은 바꿀 수 없고, 언제든 공유를 멈출 수 있습니다.</p>
+    <div class="share-opts">
+      <label class="switch"><input type="checkbox" id="publish"> <span id="publishLabel">링크로 공유</span></label>
+      <label class="switch"><input type="checkbox" id="listed"> <span>공개 목록에도 올리기</span></label>
+    </div>
+    <div class="share" id="shareBox" hidden style="margin-top:12px">
+      <input type="text" id="shareUrl" readonly aria-label="공유용 결과 주소">
+      <button class="btn ghost" id="copy" type="button">주소 복사</button>
+    </div>
+  </section>
+
+  <section id="metaSec" hidden>
+    <h2>검수 정보</h2>
+    <dl class="meta" id="meta"></dl>
+    <div class="actions" style="margin-top:22px">
+      <a class="btn ghost" id="reshoot" href="#">다시 찍어 올리기</a>
+      <button class="btn danger" id="delete" type="button">검수 지우기</button>
+    </div>
+  </section>
+</main>
+<script type="module">
+import { $, esc, getJSON, topbar, tagHTML, when, duration, TYPE_KO, FACE_KO, MODE_KO } from '/service/service.js';
+$('top').innerHTML = topbar('');
+const owner = location.pathname.split('/')[2];
+const STAGES = [['queued', '차례 기다리기'], ['decode', '영상 읽기'], ['poses', '카메라 위치 찾기'], ['register', '기기 모델 맞추기'],
+  ['samples', '표면 색 모으기'], ['detect', '하자 찾기'], ['evidence', '근거 장면 고르기'], ['bundle', '결과 만들기']];
+let timer = null;
+
+function renderTimeline(d) {
+  const cur = d.status === 'queued' ? 'queued' : (d.stage === 'start' ? 'decode' : d.stage);
+  const idx = Math.max(0, STAGES.findIndex(([k]) => k === cur));
+  $('timeline').innerHTML = STAGES.map(([k, t], i) => {
+    const cls = i < idx ? 'done' : i === idx ? 'now' : '';
+    return `<li class="${cls}"><span class="dot" aria-hidden="true"></span><span>${t}</span><span class="small">${i < idx ? '끝남' : i === idx ? '진행 중' : ''}</span></li>`;
+  }).join('');
+}
+
+function render(d) {
+  const title = d.title || `${d.device_name || d.device} 검수`;
+  $('title').textContent = title;
+  document.title = `${title} | flawmap`;
+  $('sub').textContent = `검수 번호 ${d.id}, ${when(d.created)} 접수${d.requester ? `, 요청자 ${d.requester}` : ''}`;
+  for (const id of ['progressSec', 'failSec', 'doneSec', 'adviceSec', 'publishSec', 'metaSec']) $(id).hidden = true;
+  $('metaSec').hidden = false;
+  const reshoot = `/new?replaces=${encodeURIComponent(owner)}`;
+  $('reshoot').href = reshoot;
+  $('retryLink').href = reshoot;
+
+  if (d.status === 'queued' || d.status === 'processing' || d.status === 'uploaded') {
+    $('progressSec').hidden = false;
+    const p = d.status === 'processing' ? (d.progress || 0) : 0;
+    $('progressBar').style.width = `${Math.round(p * 100)}%`;
+    $('progressHead').textContent = d.status === 'queued' ? '차례를 기다리고 있습니다' : `${d.stage_ko || '처리'} 중입니다`;
+    const ahead = d.jobs_ahead ? `앞에 ${d.jobs_ahead}건이 있습니다. ` : '';
+    $('progressNote').textContent = `${ahead}${d.eta_s ? `남은 시간은 약 ${duration(d.eta_s)}입니다. ` : ''}이 화면을 닫아도 처리는 계속됩니다.`;
+    renderTimeline(d);
+  } else if (d.status === 'failed') {
+    $('failSec').hidden = false;
+    const e = d.error || {};
+    $('failBox').innerHTML = `<p><b>${esc(e.message || '처리하지 못했습니다.')}</b></p><p>${esc(e.hint || '')}</p>` +
+      (e.detail ? `<p class="small muted">기술 정보: ${esc(e.detail)}</p>` : '');
+  } else if (d.status === 'done') {
+    const s = d.summary || {};
+    $('doneSec').hidden = false;
+    $('tag').innerHTML = tagHTML(d, { big: true });
+    $('viewLink').href = d.view_url;
+    $('dlist').innerHTML = (s.defects || []).length
+      ? s.defects.map((x) => `<li><span class="num">${x.id}</span><span><b>${esc(TYPE_KO[x.type] || x.type)}</b><br><span class="small muted">${esc(x.location_ko)}</span></span></li>`).join('')
+      : '<li style="display:block"><span class="muted">촬영된 부위에서 찾은 하자가 없습니다.</span></li>';
+    if (d.superseded_by) {
+      $('superseded').hidden = false;
+      $('superseded').innerHTML = `<p>새 검수(${esc(d.superseded_by)})로 대체된 결과입니다. 공유 설정은 새 결과로 옮겨 갔습니다.</p>`;
+    }
+    const adv = s.advice || [];
+    if (adv.length) { $('adviceSec').hidden = false; $('advice').innerHTML = adv.map((a) => `<li>${esc(a)}</li>`).join(''); }
+    if (!d.superseded_by) {
+      $('publishSec').hidden = false;
+      $('publish').checked = d.published;
+      $('listed').checked = d.listed;
+      $('listed').disabled = !d.published;
+      $('publishLabel').textContent = d.published ? '링크로 공유 중' : '링크로 공유';
+      $('shareBox').hidden = !d.published;
+      $('shareUrl').value = new URL(d.share_url, location.origin).href;
+    }
+  }
+  const pr = (d.summary || {}).processing || {};
+  const rows = [
+    ['기종', d.device_name || d.device],
+    ...d.passes.map((p) => [FACE_KO[p.face_up] || p.face_up, p.public
+      ? `공개 영상 uCO3D ${p.public} (${p.license || 'CC BY 4.0'})${p.sha256 ? `, 영상 SHA-256 ${p.sha256}…` : ''}`
+      : `${p.check ? `${p.check.duration_s}초, ${p.check.width}×${p.check.height}` : ''}${p.sha256 ? `, 영상 SHA-256 ${p.sha256}…` : ''}${p.sample ? ' (가상 샘플)' : ''}`]),
+    ...(pr.pose_mode ? [['위치 측정', MODE_KO[pr.pose_mode] || pr.pose_mode]] : []),
+    ...(pr.anchor ? [['기기 모델', MODE_KO[pr.anchor] || pr.anchor]] : []),
+    ...(pr.device_estimate ? [['기종 추정', `잰 크기 ${pr.device_estimate.size_mm.map((x) => x.toFixed(1)).join(' × ')} mm, ${pr.device_estimate.matched_name ? `${pr.device_estimate.matched_name} 도면과 ${pr.device_estimate.tolerance_mm} mm 안에서 일치` : '맞는 도면 없음'}`]] : []),
+    ...(pr.version ? [['프로그램 버전', pr.version]] : []),
+    ...(d.finished && d.status !== 'queued' ? [['처리 끝난 시각', when(d.finished)]] : []),
+    ...((d.summary || {}).seconds ? [['처리 시간', duration(d.summary.seconds)]] : []),
+  ];
+  $('meta').innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  $('delete').disabled = d.status === 'processing';
+}
+
+async function poll() {
+  try {
+    const d = await getJSON(`/api/inspections/${owner}`);
+    render(d);
+    clearTimeout(timer);
+    if (['uploaded', 'queued', 'processing'].includes(d.status)) timer = setTimeout(poll, 2000);
+  } catch (e) {
+    $('title').textContent = e.status === 404 ? '검수를 찾을 수 없습니다' : '상태를 불러오지 못했습니다';
+    $('sub').textContent = e.status === 404 ? '지워졌거나 주소가 잘못되었습니다.' : '잠시 뒤에 새로 고쳐 주세요.';
+    if (e.status !== 404) timer = setTimeout(poll, 5000);
+  }
+}
+
+async function share(body) {
+  const d = await getJSON(`/api/inspections/${owner}/share`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  render(d);
+}
+$('publish').addEventListener('change', () => share({ published: $('publish').checked, listed: $('publish').checked && $('listed').checked }));
+$('listed').addEventListener('change', () => share({ published: true, listed: $('listed').checked }));
+$('copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('shareUrl').value); $('copy').textContent = '복사함'; } catch { $('shareUrl').select(); }
+  setTimeout(() => { $('copy').textContent = '주소 복사'; }, 1600);
+});
+$('delete').addEventListener('click', async () => {
+  if (!confirm('이 검수를 지울까요? 결과와 올린 촬영본이 서버에서 지워지고, 공유한 링크도 더는 열리지 않습니다.')) return;
+  await fetch(`/api/inspections/${owner}`, { method: 'DELETE' });
+  location.href = '/new';
+});
+poll();
+</script>
+</body>
+</html>

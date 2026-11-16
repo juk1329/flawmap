@@ -1,0 +1,45 @@
+# iPhone 11 reference shape. Apple's current dimensional-drawing index no longer lists the iPhone 11,
+# so the values come from the archived Accessory Design Guidelines (Wayback Machine copy of
+# developer.apple.com/accessories/Accessory-Design-Guidelines.pdf, 2020-03-10, section 29.3 page 131;
+# drawing dated 2019-09-10). Millimetres. Values marked "estimated" are not dimensioned on the drawing.
+name: iPhone 11
+slug: iphone-11
+source: "Apple Accessory Design Guidelines (archived 2020-03-10) section 29.3 iPhone 11, page 131"
+length: 150.91
+width: 75.72
+thickness: 8.32
+glass: {width: 71.32, length: 146.52}
+display_active: {width: 64.58, length: 139.78}
+# Detail E "profile (all four corners)" (16.36 / 16.46 in the two directions; 16.40 used).
+corner: [[0.0, 16.40], [0.66, 8.40], [3.51, 3.51], [8.40, 0.66], [16.40, 0.0]]
+# Detail B "profile (all sides)": the widest point of the rounded side is 4.37 below the front and 3.94
+# above the back (8.31 vs 8.32 total). z below is from the mid-plane (widest point at z = -0.215).
+side_profile:
+  - [4.58, 4.155, screen]   # HOUSING SPLINE TO START OF FLAT AREA (front), z = 4.37 - 0.215
+  - [2.19, 3.745, screen]   # 3.96 - 0.215
+  - [1.40, 3.235, frame]    # 3.45 - 0.215
+  - [0.25, 1.515, frame]    # 1.73 - 0.215
+  - [0.00, -0.215, frame]   # widest point
+  - [0.25, -1.515, frame]   # -1.30 - 0.215
+  - [1.40, -3.745, back]    # -3.53 - 0.215
+  - [2.19, -4.155, back]    # -3.94 - 0.215, flat back starts here
+# Detail D (back view: x from the left edge, y down from the top edge). The plateau outline position is
+# estimated from its size (28.80 x 31.99 outer, 25.06 x 28.25 inner) and the lens/flash centres.
+camera:
+  plateau_outer: {x: [3.84, 32.64], y: [3.63, 35.62], radius: 7.0}   # position and radius estimated
+  plateau_inner: {x: [5.71, 30.77], y: [5.50, 33.75], radius: 5.5}   # position and radius estimated
+  plateau_height: 0.70      # FLASH HEIGHT (section G-G)
+  lenses:
+    - {center: [12.48, 12.48], diameter: 12.10, height: 1.49}    # REAR CAMERA TURRET HEIGHT (section F-F)
+    - {center: [12.48, 26.76], diameter: 12.10, height: 1.49}
+  flash: {center: [24.01, 19.62], diameter: 5.66}
+  mic: {center: [24.01, 12.03], diameter: 2.40}
+buttons:
+  - {name: ring_silent_switch, side: left, y_from_top: 23.39, length: 5.61, protrusion: 0.43, z_width: 2.78}
+  - {name: volume_up, side: left, y_from_top: 36.09, length: 10.92, protrusion: 0.38, z_width: 2.78}
+  - {name: volume_down, side: left, y_from_top: 49.20, length: 10.92, protrusion: 0.38, z_width: 2.78}
+  - {name: side_button, side: right, y_from_top: 42.65, length: 17.10, protrusion: 0.38, z_width: 2.78}
+openings:
+  - {name: sim_tray, side: right, y_from_top: 112.40, length: 16.34}   # 104.23 to the tray + 16.34 tray (centre estimated)
+  - {name: bottom_ports_speaker_mics, side: bottom, x_from_left: 37.86, length: 48.0}   # holes span ~14-62 mm
+default_color: {frame: [120, 30, 40], back: [130, 35, 45], screen: [12, 12, 14], camera: [110, 30, 40], lens: [10, 10, 12], button: [120, 30, 40]}

@@ -1,0 +1,55 @@
+# iPhone 12 reference shape, read from Apple's public dimensional drawing
+# (developer.apple.com/download/files/accessories/dimensional-drawings/iphone-12.pdf, sheet 1, dated
+# 2020-10-16; downloaded 2026-11-15). Values are millimetres. Apple's drawing may not be redistributed;
+# this file only holds the dimensions we read from it. Values marked "estimated" are not on the drawing.
+name: iPhone 12
+slug: iphone-12
+source: "Apple Dimensional Drawings iphone-12.pdf sheet 1 (Detail A corner, Detail B profile, Detail D camera, side views)"
+length: 146.71            # PRODUCT LENGTH
+width: 71.52              # PRODUCT WIDTH
+thickness: 7.39           # PRODUCT THICKNESS (front glass to back glass, camera excluded)
+glass: {width: 69.42, length: 144.61}
+display_active: {width: 64.58, length: 139.77}
+# Detail A "corner profile (all four corners)": the corner curve as (inset from the side edge,
+# inset from the top/bottom edge); symmetric about the diagonal, tangent to both edges.
+corner: [[0.0, 14.64], [0.13, 10.59], [1.07, 6.66], [3.31, 3.31], [6.66, 1.07], [10.59, 0.13], [14.64, 0.0]]
+# Detail B "profile (all sides)": [inset from the outermost side, z from the mid-plane, part of the
+# segment that starts here], listed from the front (+z, screen) to the back (-z). The cover-glass edge
+# roll-off between inset 0.95 and the flat glass is not dimensioned (estimated chamfer).
+side_profile:
+  - [1.15, 3.695, screen]   # HOUSING SPLINE TO START OF FLAT AREA ON TOP SIDE (1.15 all around); z = 7.39 / 2
+  - [0.95, 3.62, frame]
+  - [0.51, 3.59, frame]
+  - [0.15, 3.36, frame]
+  - [0.01, 2.94, frame]
+  - [0.00, 2.50, frame]
+  - [0.00, -2.50, frame]
+  - [0.01, -2.94, frame]
+  - [0.15, -3.36, frame]
+  - [0.51, -3.59, frame]
+  - [0.95, -3.62, back]
+  - [1.15, -3.695, back]    # same 1.15 assumed for the back (profile is "all sides")
+# Detail D, rear camera, in back-view coordinates: x from the left edge and y down from the top edge
+# when looking at the back.
+camera:
+  plateau_outer: {x: [3.43, 34.13], y: [3.43, 36.30], radius: 7.0}   # radius estimated
+  plateau_inner: {x: [5.37, 32.19], y: [5.37, 34.37], radius: 5.5}   # radius estimated
+  plateau_height: 0.73      # BACK GLASS TO CAMERA PLATEAU
+  lenses:
+    - {center: [12.73, 12.73], diameter: 12.10, height: 1.51}    # BACK GLASS TO REAR CAMERA GLASS
+    - {center: [12.73, 27.01], diameter: 12.10, height: 1.51}
+  flash: {center: [25.28, 19.87], diameter: 5.66}
+  mic: {center: [25.28, 12.28], diameter: 2.40}
+# Side views. side = left/right as seen from the screen; y_from_top = centre measured from the top
+# edge; length along the edge; protrusion out of the frame; z_width across the frame.
+buttons:
+  - {name: ring_silent_switch, side: left, y_from_top: 25.99, length: 5.70, protrusion: 0.60, z_width: 2.76}
+  - {name: volume_up, side: left, y_from_top: 39.31, length: 11.30, protrusion: 0.45, z_width: 2.76}
+  - {name: volume_down, side: left, y_from_top: 53.31, length: 11.30, protrusion: 0.45, z_width: 2.76}
+  - {name: side_button, side: right, y_from_top: 46.31, length: 17.80, protrusion: 0.45, z_width: 2.76}
+# Flush openings; used as detection exclusion zones on the frame (with a margin).
+openings:
+  - {name: sim_tray, side: left, y_from_top: 111.88, length: 16.04}
+  - {name: bottom_ports_speaker_mics, side: bottom, x_from_left: 37.0, length: 40.0}   # holes span ~19-57 mm
+# Plain colour used for the synthetic captures and as the inspection-view base colour.
+default_color: {frame: [40, 52, 82], back: [45, 58, 92], screen: [12, 12, 14], camera: [30, 34, 44], lens: [10, 10, 12], button: [40, 52, 82]}

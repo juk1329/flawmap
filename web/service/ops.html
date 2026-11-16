@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>처리 현황 | flawmap</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/service/service.css">
+</head>
+<body>
+<header class="top" id="top"></header>
+<main class="wrap" style="max-width:1280px">
+  <section>
+    <h1>처리 현황</h1>
+    <p class="muted" id="stat"></p>
+  </section>
+  <section>
+    <table class="jobs">
+      <thead><tr><th>검수 번호</th><th>상태</th><th>단계</th><th>기종</th><th>촬영</th><th>접수</th><th>처리 시간</th><th>결과</th><th>오류</th><th>요청자 화면</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+</main>
+<script type="module">
+import { $, esc, getJSON, topbar, when, duration } from '/service/service.js';
+$('top').innerHTML = topbar('');
+const ST = { uploaded: '받음', queued: '대기', processing: '처리 중', done: '끝남', failed: '실패' };
+async function load() {
+  const r = await getJSON('/api/ops/jobs');
+  const n = (s) => r.jobs.filter((j) => j.status === s).length;
+  $('stat').textContent = `대기 ${n('queued')}, 처리 중 ${n('processing')}, 끝남 ${n('done')}, 실패 ${n('failed')}. 남은 디스크 ${r.disk_free_gb} GB. 처리기 ${r.worker_alive ? '동작 중' : '멈춤'}${r.current ? ` (${r.current})` : ''}.`;
+  $('rows').innerHTML = r.jobs.map((j) => {
+    const s = j.summary || {};
+    const secs = j.finished && j.started ? j.finished - j.started : (j.started ? Date.now() / 1000 - j.started : null);
+    return `<tr><td>${esc(j.id)}${j.source !== 'upload' ? `<br><span class="small muted">${({ demo: '예시', sample: '가상 샘플', public: '공개 영상' })[j.source] || j.source}</span>` : ''}</td>` +
+      `<td class="st ${esc(j.status)}">${ST[j.status] || esc(j.status)}</td>` +
+      `<td>${j.status === 'processing' ? `${esc(j.stage_ko || '')} ${Math.round((j.progress || 0) * 100)}%` : ''}</td>` +
+      `<td>${esc(j.device_name || j.device)}</td><td>${j.passes.map((p) => (p.face_up === 'back' ? '뒷면' : '화면')).join(', ')}</td>` +
+      `<td>${when(j.created)}</td><td>${secs ? duration(secs) : ''}</td>` +
+      `<td>${j.status === 'done' ? `하자 ${s.n_defects}, 촬영 ${Math.round((s.coverage || 0) * 100)}%${j.published ? (j.listed ? ', 공개 목록' : ', 링크 공유') : ''}` : ''}</td>` +
+      `<td>${j.error ? `${esc(j.error.code)}<br><span class="small muted">${esc(j.error.detail || '')}</span>` : ''}</td>` +
+      `<td><a href="${esc(j.owner_url)}">열기</a></td></tr>`;
+  }).join('');
+}
+load();
+setInterval(load, 3000);
+</script>
+</body>
+</html>

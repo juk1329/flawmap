@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.env
+.venv/
+.pytest_cache/
+# docs/ holds local working notes; only the shared project guide is committed
+docs/*
+!docs/project_guide.md
+# generated / downloaded data and run outputs (datasets, Apple drawings and derived CAD
+# must not be redistributed)
+data/
+runs/
+*.db
+# vendored browser libraries are fetched by scripts/fetch_web_vendor.sh
+web/vendor/*
+!web/vendor/README

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flawmap"
+version = "0.1.0"
+description = "Find and show the defects of a used phone or tablet from a 360-degree capture, anchored on the model's reference 3D shape"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Team 강화실패 (Korea University capstone 2026-2)" }]
+# Versions are intentionally unpinned: the target environment is the existing
+# `env_isaaclab` conda env (Python 3.11). Extra packages are installed with
+# scripts/install_extra_deps.sh, which applies scripts/constraints-isaacsim.txt.
+dependencies = [
+  "numpy", "scipy", "trimesh", "open3d", "manifold3d", "torch", "pydantic>=2",
+  "pyyaml", "rich", "opencv-python-headless", "pillow", "imageio", "imageio-ffmpeg",
+  "scikit-image", "fastapi", "uvicorn",
+]
+
+[project.optional-dependencies]
+download = ["gdown", "remotezip", "huggingface_hub"]
+dev = ["pytest"]
+
+[project.scripts]
+flawmap = "flawmap.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["flawmap*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+markers = [
+  "slow: longer-running unit tests",
+]
+# ROS 2 Humble (sourced in ~/.bashrc on the dev machine) exports a Python-3.10
+# PYTHONPATH whose pytest plugins crash on import; disable them explicitly.
+addopts = "-ra -p no:launch_testing -p no:launch_testing_ros -p no:launch_ros"

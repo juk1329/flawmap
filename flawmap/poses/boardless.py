@@ -1,0 +1,491 @@
+"""Camera poses without the printed board: the ARKit trajectory, corrected by the device's own outline.
+
+ARKit poses are metric (mm) but drift by millimetres to centimetres over a circle. The board used to
+give drift-free poses. Without it the reference model takes the board's place: its outline is known
+in 3D, so once the device is found, every keyframe's camera can be refined against the device
+outline (model-based tracking) with ARKit as the motion prior.
+
+1. **World frame:** ARKit's world (y up, gravity) turned z-up, in mm.
+2. **Where is the device:** the point where the keyframes' optical axes meet (the seller keeps the
+   device in the middle of the picture); the floor height from the LiDAR depth when there is any.
+3. **Which way does it lie:** grid search over heading and position. The model's upper and lower
+   outline loops are projected (a visible side face means the lower loop forms the silhouette,
+   otherwise the upper one) and scored by the truncated distance to image edges, coarse then fine.
+   The 180-degree twin has the same outline; full registration (camera bump, buttons) decides.
+4. **Joint fit** of the device pose and the ARKit drift over all keyframes: the device lies flat on
+   the floor (gravity from ARKit, height from LiDAR), so only its heading and position are free;
+   the drift is a smooth function of time (6-DoF knots, linear in between, the first knot fixed).
+   Edge-alignment rounds as in ``register.register_device`` with shrinking search windows.
+
+Why not refine each frame's camera on its own (the first version, 2026-11-16): on a wood floor the
+dark frame side hardly differs from the floor, the strongest edge is the inner one between back
+glass and frame, and a free 6-DoF camera per frame happily tilts to put the outline there (cameras
+6-8 mm off, 20 px model reprojection on the synthetic wood capture). With the device on the floor
+and a smooth drift, a wrong edge in single views is outvoted.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import cv2
+import numpy as np
+from scipy.optimize import least_squares
+from scipy.spatial.transform import Rotation
+
+from ..anchor.parametric import _resample_closed, outward_normals, rest_pose
+from ..anchor.register import _grad, _project, match_edges, register_device, silhouette_points
+from ..geometry.camera import Camera
+from ..geometry.transforms import inv_T, make_T, rot_z, se3_exp
+from ..surface.raycast import RaycastScene
+from .align import CapturePoses
+
+T_W_ARK = make_T(np.array([[1.0, 0, 0], [0, 0, -1.0], [0, 1.0, 0]]))     # ARKit y-up -> z-up world
+
+
+@dataclass
+class BoardlessResult:
+    poses: CapturePoses
+    T_world_cad: np.ndarray
+    info: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------- where the device is
+def axes_meeting_point(Ts: list[np.ndarray]) -> np.ndarray:
+    """Least-squares point closest to the optical axes (OpenCV cameras: +z looks forward)."""
+    A, b = np.zeros((3, 3)), np.zeros(3)
+    for T in Ts:
+        c, z = T[:3, 3], T[:3, 2] / np.linalg.norm(T[:3, 2])
+        P = np.eye(3) - np.outer(z, z)
+        A += P
+        b += P @ c
+    return np.linalg.lstsq(A, b, rcond=None)[0]
+
+
+def floor_height(cap, ids: list[int], T_world_cam: dict[int, np.ndarray], centre: np.ndarray, radius: float = 150.0,
+                 min_conf: int = 2) -> float | None:
+    """Height of the surface the device lies on: mode of LiDAR point heights near the device."""
+    zs = []
+    for i in ids:
+        d = cap.depth(i)
+        if d is None:
+            continue
+        conf = cap.confidence(i)
+        h, w = d.shape[:2]
+        K = cap.K[i]
+        sx, sy = w / cap.width, h / cap.height
+        fx, fy = K[0, 0] * sx, K[1, 1] * sy
+        cx, cy = (K[0, 2] + 0.5) * sx - 0.5, (K[1, 2] + 0.5) * sy - 0.5
+        vs, us = np.mgrid[0:h, 0:w]
+        z = d.astype(np.float32)
+        ok = z > 0
+        if conf is not None and conf.shape == d.shape:
+            ok &= conf >= min_conf
+        pc = np.stack([(us - cx) / fx * z, (vs - cy) / fy * z, z], -1)[ok]
+        T = T_world_cam[i]
+        pw = pc @ T[:3, :3].T + T[:3, 3]
+        near = np.hypot(pw[:, 0] - centre[0], pw[:, 1] - centre[1]) < radius
+        zs.append(pw[near, 2])
+    if not zs or sum(len(z) for z in zs) < 500:
+        return None
+    z = np.concatenate(zs)
+    lo, hi = centre[2] - 200.0, centre[2] + 60.0
+    z = z[(z > lo) & (z < hi)]
+    if len(z) < 500:
+        return None
+    hist, edges = np.histogram(z, bins=np.arange(lo, hi + 1.0, 1.0))
+    hist = np.convolve(hist, [1, 2, 3, 2, 1], mode="same")
+    m = 0.5 * (edges[np.argmax(hist)] + edges[np.argmax(hist) + 1])
+    return float(np.median(z[np.abs(z - m) < 3.0]))
+
+
+# ---------------------------------------------------------------------------- which way it lies
+def _edge_distance(img: np.ndarray, scale: float, trunc: float) -> tuple[np.ndarray, np.ndarray]:
+    """Truncated distance to the nearest strong edge and that edge's gradient direction (radians)."""
+    g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img
+    g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    g = cv2.GaussianBlur(g, (0, 0), 1.0)
+    gx, gy = cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1)
+    mag = np.hypot(gx, gy)
+    hi = float(np.percentile(mag, 97.0))           # strong edges only: the device outline, not floor grain
+    e = cv2.Canny(g, max(hi * 0.4, 10.0), max(hi, 25.0), L2gradient=True)
+    dist, lab = cv2.distanceTransformWithLabels(255 - e, cv2.DIST_L2, 3, labelType=cv2.DIST_LABEL_PIXEL)
+    theta = np.arctan2(gy, gx)
+    ang_of_label = np.concatenate([[0.0], theta[e > 0]]).astype(np.float32)    # labels follow the raster order of edge pixels
+    return np.minimum(dist, trunc).astype(np.float32), ang_of_label[np.clip(lab, 0, len(ang_of_label) - 1)]
+
+
+class _Loops:
+    """The model's upper and lower plan-outline loops in the rest pose (device centred over the
+    origin, lying on z = 0), with the side-face normals."""
+
+    def __init__(self, model, face_up: str, n: int = 120):
+        R0 = rest_pose(model, face_up)
+        xy = _resample_closed(model.outline_xy, n)
+        nrm = outward_normals(xy)
+        a = np.column_stack([xy, np.full(len(xy), model.z_front)])
+        b = np.column_stack([xy, np.full(len(xy), model.z_back)])
+        pa, pb = a @ R0[:3, :3].T + R0[:3, 3], b @ R0[:3, :3].T + R0[:3, 3]
+        self.up, self.lo = (pa, pb) if pa[:, 2].mean() > pb[:, 2].mean() else (pb, pa)
+        self.nrm = np.column_stack([nrm, np.zeros(len(nrm))]) @ R0[:3, :3].T
+        self.R0 = R0
+
+
+def _score(loops: _Loops, yaw_deg: np.ndarray, txy: np.ndarray, z0: float, views: list, centre_xy: np.ndarray,
+           trunc: float, prior_px: float = 1.0, prior_mm: float = 25.0) -> np.ndarray:
+    """Cost of every (yaw, translation): mean oriented chamfer distance of the projected outline
+    (distance to the nearest strong edge, plus a penalty when that edge does not run along the
+    outline), plus a mild prior towards the point the cameras aimed at. Plain chamfer distance is
+    fooled by floors with edges everywhere (the printed board itself, 2026-11-16)."""
+    out = np.zeros((len(yaw_deg), len(txy)), np.float64)
+    prior = prior_px * (np.sum((txy - centre_xy) ** 2, axis=1) / prior_mm ** 2)
+    for k, yaw in enumerate(yaw_deg):
+        R = rot_z(yaw)
+        up, lo, nr = loops.up @ R.T, loops.lo @ R.T, loops.nrm @ R.T
+        mid = 0.5 * (up + lo)
+        t = np.column_stack([txy, np.full(len(txy), z0)])                     # (T,3)
+        acc = np.zeros(len(txy))
+        for cam, Tcw, (dt, ang) in views:
+            C = -Tcw[:3, :3].T @ Tcw[:3, 3]
+            vis = np.einsum("nj,tnj->tn", nr, C[None, None, :] - (mid[None] + t[:, None, :])) > 0
+            P = np.where(vis[..., None], lo[None], up[None]) + t[:, None, :]        # (T,N,3)
+            uv = []
+            for Q in (P, P + nr[None]):                                           # the point and 1 mm outwards
+                pc = Q @ Tcw[:3, :3].T + Tcw[:3, 3]
+                z = np.maximum(pc[..., 2], 1.0)
+                uv.append((cam.fx * pc[..., 0] / z + cam.cx, cam.fy * pc[..., 1] / z + cam.cy))
+            (u, v), (u2, v2) = uv
+            phi = np.arctan2(v2 - v, u2 - u)                                      # outline normal in the image
+            h, w = dt.shape
+            ui, vi = np.clip(np.round(u).astype(int), 0, w - 1), np.clip(np.round(v).astype(int), 0, h - 1)
+            inside = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+            mis = 1.0 - np.abs(np.cos(ang[vi, ui] - phi))
+            d = np.where(inside, np.minimum(dt[vi, ui] + 0.6 * trunc * mis, trunc), trunc)
+            acc += d.mean(1)
+        out[k] = acc / len(views) + prior
+    return out
+
+
+def find_device(model, face_up: str, frames: dict[int, np.ndarray], cams: dict[int, Camera], T_world_cam: dict[int, np.ndarray],
+                centre: np.ndarray, z_floor: float, ids: list[int], radius: float = 32.0, log=print) -> list[np.ndarray]:
+    """Candidate ``T_world_cad`` from a coarse-to-fine search, best first (both 180-degree twins)."""
+    loops = _Loops(model, face_up)
+
+    def views_at(scale: float, trunc: float):
+        return [(cams[i].scaled(scale), inv_T(T_world_cam[i]), _edge_distance(frames[i], scale, trunc)) for i in ids]
+
+    # coarse: quarter resolution, 6 deg, 4 mm
+    vq = views_at(0.25, 8.0)
+    yaws = np.arange(0.0, 360.0, 6.0)
+    g = np.arange(-radius, radius + 1e-9, 4.0)
+    txy = np.stack(np.meshgrid(g, g), -1).reshape(-1, 2) + centre[:2]
+    S = _score(loops, yaws, txy, z_floor, vq, centre[:2], 8.0)
+    order = np.argsort(S, axis=None)
+    picks = []
+    for f in order:
+        k, j = np.unravel_index(f, S.shape)
+        y, t = yaws[k], txy[j]
+        if all(min(abs(y - y2) % 180, 180 - abs(y - y2) % 180) > 15 or np.linalg.norm(t - t2) > 8 for y2, t2, _ in picks):
+            picks.append((y, t, S[k, j]))
+        if len(picks) >= 6:
+            break
+    log(f"  boardless search coarse: best {picks[0][2]:.2f} px at yaw {picks[0][0]:.0f}, xy {np.round(picks[0][1], 1)}; "
+        f"next {[round(p[2], 2) for p in picks[1:4]]}")
+    # fine: half resolution, 1.5 deg, 1 mm around each pick
+    vh = views_at(0.5, 10.0)
+    best = []
+    for y0, t0, _ in picks:
+        ys = y0 + np.arange(-6.0, 6.01, 1.5)
+        gg = np.arange(-5.0, 5.01, 1.0)
+        tt = np.stack(np.meshgrid(gg, gg), -1).reshape(-1, 2) + t0
+        Sf = _score(loops, ys, tt, z_floor, vh, centre[:2], 10.0)
+        k, j = np.unravel_index(np.argmin(Sf), Sf.shape)
+        best.append((Sf[k, j], ys[k], tt[j]))
+    best.sort(key=lambda b: b[0])
+    log(f"  boardless search fine: {[(round(b[0], 2), round(float(b[1]) % 360, 1)) for b in best[:4]]}")
+    out = []
+    for s, y, t in best[:2]:
+        for twin in (0.0, 180.0):
+            out.append(make_T(rot_z(y + twin), [t[0], t[1], z_floor]) @ loops.R0)
+    return out
+
+
+def lens_contrast(model, frames: dict[int, np.ndarray], cams: dict[int, Camera], T_world_cam: dict[int, np.ndarray],
+                  T_world_cad: np.ndarray, views: list[int], scale: float = 0.25) -> float | None:
+    """Median lightness of the back glass minus that of the camera lenses, where the model puts them.
+    The outline cannot tell a device from its 180-degree twin; the dark lenses can (back up only)."""
+    from ..anchor.parametric import PARTS
+
+    scene = RaycastScene(model.mesh, None)
+    lens, back = PARTS.index("lens"), PARTS.index("back")
+    Ls, Bs = [], []
+    for i in views:
+        cam = cams[i].scaled(scale)
+        h = scene.cast(cam, inv_T(T_world_cad) @ T_world_cam[i], step=1)
+        if not h.hit.any():
+            continue
+        lab = np.full(h.hit.shape, -1, int)
+        lab[h.hit] = model.mesh.face_label[h.face[h.hit]]
+        g = cv2.cvtColor(cv2.resize(frames[i], (h.hit.shape[1], h.hit.shape[0]), interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY)
+        if (lab == lens).sum() >= 10 and (lab == back).sum() >= 50:
+            Ls.append(np.median(g[lab == lens]))
+            Bs.append(np.median(g[lab == back]))
+    if len(Ls) < 3:
+        return None
+    return float(np.median(np.array(Bs) - np.array(Ls)))
+
+
+def refine_camera(scene: RaycastScene, frame_grad, cam: Camera, T_wc0: np.ndarray, T_world_cad: np.ndarray,
+                  T_prior: np.ndarray, searches=(3.0, 2.0), sigma_rot_deg: float = 0.15, sigma_mm: float = 1.0,
+                  max_points: int = 500, min_points: int = 40, rng=None) -> tuple[np.ndarray, dict | None]:
+    """One camera pose that puts the model's silhouette on the image edges, pulled towards ``T_prior``
+    (right perturbation in the camera frame; the prior residuals are the rotation vector and
+    translation of ``inv(T_prior) @ T`` over their sigmas, Huber like the edge terms)."""
+    rng = rng or np.random.default_rng(0)
+    gx, gy = frame_grad
+    T = T_wc0.copy()
+    T_cad_world = inv_T(T_world_cad)
+    sr, st = np.radians(sigma_rot_deg), sigma_mm
+    Tp_inv = inv_T(T_prior)
+    info = None
+    for S in searches:
+        X, n2 = silhouette_points(scene, cam, T_cad_world @ T)
+        if len(X) < min_points:
+            return T, None
+        if len(X) > max_points:
+            sel = rng.choice(len(X), max_points, replace=False)
+            X, n2 = X[sel], n2[sel]
+        Xw = X @ T_world_cad[:3, :3].T + T_world_cad[:3, 3]
+        p, _ = _project(cam, inv_T(T), Xw)
+        tgt, _ = match_edges(gx, gy, p, n2, S)
+        ok = np.isfinite(tgt[:, 0])
+        if ok.sum() < min_points:
+            return T, None
+        Xo, no, to = Xw[ok], n2[ok], tgt[ok]
+
+        def res(xi):
+            Tn = T @ se3_exp(xi)
+            q, _ = _project(cam, inv_T(Tn), Xo)
+            D = Tp_inv @ Tn
+            return np.concatenate([np.einsum("ij,ij->i", q - to, no), Rotation.from_matrix(D[:3, :3]).as_rotvec() / sr, D[:3, 3] / st])
+
+        sol = least_squares(res, np.zeros(6), loss="huber", f_scale=1.0, x_scale=[1e-3] * 3 + [0.2] * 3, max_nfev=40)
+        T = T @ se3_exp(sol.x)
+        info = {"n": int(len(Xo)), "median_px": float(np.median(np.abs(res(np.zeros(6))[: len(Xo)])))}
+    return T, info
+
+
+# ---------------------------------------------------------------------------- joint fit: device on the floor + smooth drift
+def _drift_vec(D: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """6-vector of a world-frame correction: rotation vector and the displacement of point ``c``."""
+    return np.concatenate([Rotation.from_matrix(D[:3, :3]).as_rotvec(), D[:3, :3] @ c + D[:3, 3] - c])
+
+
+def _drift_T(v: np.ndarray, c: np.ndarray) -> np.ndarray:
+    R = Rotation.from_rotvec(v[:3]).as_matrix()
+    return make_T(R, c + v[3:] - R @ c)
+
+
+@dataclass
+class JointFit:
+    T_world_cad: np.ndarray
+    drift: dict[int, np.ndarray]          # frame -> world-frame correction D (camera = D @ ARKit)
+    knots: np.ndarray                     # (K, 6) drift knots (rotation vector, displacement of the device centre)
+    rounds: list = field(default_factory=list)
+    per_view: dict = field(default_factory=dict)
+
+
+def joint_fit(model, face_up: str, frames: dict[int, np.ndarray], cams: dict[int, Camera], Tw: dict[int, np.ndarray],
+              times: dict[int, float], T_init: np.ndarray, z_floor: float | None, views: list[int], knot_times: np.ndarray,
+              knots_init: np.ndarray | None = None, searches=(12.0, 8.0, 5.0, 3.0, 2.5), huber_px: float = 1.0,
+              max_points_per_view: int = 400, sigma_knot_deg=(0.5, 0.5, 3.0), sigma_knot_mm: float = 15.0,
+              sigma_floor_mm: float = 1.5, log=print) -> JointFit:
+    """Device heading/position (on the floor) and a piecewise-linear ARKit drift, from image edges.
+    ``knot_times`` are fixed for the whole recording so that fits on growing time windows can hand
+    their knots on (``knots_init``)."""
+    R0 = rest_pose(model, face_up)
+    # the device: heading (deg, about the world z axis) and position offsets; its tilt stays the resting
+    # tilt of ``rest_pose`` (it lies on the floor, and ARKit's gravity is the world z axis)
+    c0 = T_init[:3, 3].copy()
+    Rz = T_init[:3, :3] @ R0[:3, :3].T
+    yaw0 = float(np.degrees(np.arctan2(Rz[1, 0], Rz[0, 0])))
+
+    def T_dev(q):
+        yaw, dx, dy, dz = q
+        return make_T(rot_z(yaw0 + yaw) @ R0[:3, :3], [c0[0] + dx, c0[1] + dy, c0[2] + dz])
+
+    kt = np.asarray(knot_times, float)
+    n_knots = len(kt)
+    w_knot = {}
+    for i in views:
+        x = np.interp(times[i], kt, np.arange(n_knots))
+        k0 = int(min(np.floor(x), n_knots - 2))
+        w_knot[i] = (k0, x - k0)
+    scene = RaycastScene(model.mesh, None)
+    grads = {i: _grad(frames[i]) for i in views}
+    sr = np.radians(np.asarray(sigma_knot_deg, float))
+    zf_target = None if z_floor is None else T_init[2, 3]
+    q = np.zeros(4 + 6 * (n_knots - 1))
+    if knots_init is not None:
+        q[4:] = np.asarray(knots_init)[1:].ravel()
+    rng = np.random.default_rng(0)
+    fit = JointFit(T_dev(q[:4]), {}, np.zeros((n_knots, 6)))
+
+    def unpack(q):
+        knots = np.vstack([np.zeros(6), q[4:].reshape(n_knots - 1, 6)])
+        return T_dev(q[:4]), knots
+
+    def drift_of(i, knots, c):
+        k0, a = w_knot[i]
+        return _drift_T((1 - a) * knots[k0] + a * knots[k0 + 1], c)
+
+    for rnd, S in enumerate(searches):
+        T_wcad, knots = unpack(q)
+        c = T_wcad[:3, 3]
+        data = []
+        for i in views:
+            Twc = drift_of(i, knots, c) @ Tw[i]
+            X, n2 = silhouette_points(scene, cams[i], inv_T(T_wcad) @ Twc)
+            if len(X) == 0:
+                continue
+            if len(X) > max_points_per_view:
+                sel = rng.choice(len(X), max_points_per_view, replace=False)
+                X, n2 = X[sel], n2[sel]
+            p, _ = _project(cams[i], inv_T(Twc), X @ T_wcad[:3, :3].T + T_wcad[:3, 3])
+            tgt, _ = match_edges(*grads[i], p, n2, S)
+            ok = np.isfinite(tgt[:, 0])
+            if ok.sum() >= 20:
+                data.append((i, X[ok], n2[ok], tgt[ok]))
+        if not data:
+            break
+
+        def residuals(qq):
+            T_wcad_, knots_ = unpack(qq)
+            c_ = T_wcad_[:3, 3]
+            out = []
+            for i, X, n2, tgt in data:
+                Twc = drift_of(i, knots_, c_) @ Tw[i]
+                p, _ = _project(cams[i], inv_T(Twc), X @ T_wcad_[:3, :3].T + T_wcad_[:3, 3])
+                out.append(np.einsum("ij,ij->i", p - tgt, n2))
+            pri = [knots_[1:, :3].ravel() / np.tile(sr, n_knots - 1), knots_[1:, 3:].ravel() / sigma_knot_mm]
+            if zf_target is not None:
+                pri.append(np.array([(T_wcad_[2, 3] - zf_target) / sigma_floor_mm]))
+            return np.concatenate(out + pri)
+
+        n_data = sum(len(d[1]) for d in data)
+        r0 = residuals(q)[:n_data]
+        sol = least_squares(residuals, q, loss="huber", f_scale=huber_px, max_nfev=30,
+                            x_scale=np.r_[0.05, 0.2, 0.2, 0.2, np.tile(np.r_[1e-3, 1e-3, 1e-3, 0.2, 0.2, 0.2], n_knots - 1)])
+        q = sol.x
+        r1 = residuals(q)[:n_data]
+        info = {"round": rnd, "search_px": S, "n_points": int(n_data), "n_views": len(data),
+                "median_abs_px_before": float(np.median(np.abs(r0))), "median_abs_px_after": float(np.median(np.abs(r1)))}
+        fit.rounds.append(info)
+        log(f"  boardless joint fit round {rnd}: {len(data)} views, {n_data} edge points, |r| median "
+            f"{info['median_abs_px_before']:.2f} -> {info['median_abs_px_after']:.2f} px")
+    T_wcad, knots = unpack(q)
+    fit.T_world_cad, fit.knots = T_wcad, knots
+    c = T_wcad[:3, 3]
+    for i in times:   # every frame, also those not used as views
+        x = np.interp(times[i], kt, np.arange(n_knots))
+        k0 = int(min(np.floor(x), n_knots - 2))
+        a = x - k0
+        fit.drift[i] = _drift_T((1 - a) * knots[k0] + a * knots[k0 + 1], c)
+    return fit
+
+
+def boardless_poses(cap, frames: dict[int, np.ndarray], cams: dict[int, Camera], model, face_up: str,
+                    n_search_views: int = 12, early_share: float = 0.3, n_fit_views: int = 48, polish: bool = False,
+                    min_lens_contrast: float = 15.0, log=print) -> BoardlessResult:
+    """Camera poses (mm, a z-up world tied to the first part of the recording) for ``frames``."""
+    ids = sorted(frames)
+    Tw = {i: T_W_ARK @ cap.T_ark_cam[i] for i in ids}
+    times = {i: float(cap.timestamps[i] - cap.timestamps[0]) for i in ids}
+    info: dict = {}
+    centre = axes_meeting_point([Tw[i] for i in ids])
+    # the floor from the early keyframes only: the world is tied to the start of the recording, and
+    # later frames carry ARKit's drift (3.3 mm too high on the synthetic wood capture when all were used)
+    n_early = max(n_search_views, int(round(len(ids) * early_share)))
+    early = ids[:n_early]
+    zf = floor_height(cap, early[:: max(1, len(early) // 8)], Tw, centre)
+    info["floor_from"] = "lidar" if zf is not None else "axes"
+    z_search = zf if zf is not None else float(centre[2] - model.spec.thickness)
+    info["floor_z"] = z_search
+    log(f"  boardless: optical axes meet at {np.round(centre, 1)} mm; floor z {z_search:.1f} mm ({info['floor_from']})")
+    sv = [early[int(k)] for k in np.linspace(0, len(early) - 1, min(n_search_views, len(early))).round()]
+    cands = find_device(model, face_up, frames, cams, Tw, centre, z_search, sv, log=log)
+    fit_views = [ids[int(k)] for k in np.linspace(0, len(ids) - 1, min(n_fit_views, len(ids))).round()]
+    n_knots = int(np.clip(round(len(ids) / 30), 3, 6))
+    t_lo, t_hi = min(times.values()), max(times.values())
+    kt = np.linspace(t_lo, t_hi, n_knots)
+
+    def window(frac):
+        return [i for i in fit_views if times[i] <= t_lo + frac * (t_hi - t_lo) + 1e-9]
+
+    # the candidates (both 180-degree twins of the two best headings): short fits on the early part
+    trials = []
+    for T0 in cands:
+        f = joint_fit(model, face_up, frames, cams, Tw, times, T0, zf, window(0.4), kt, searches=(12.0, 6.0), log=lambda m: None)
+        trials.append((f.rounds[-1]["median_abs_px_after"] if f.rounds else np.inf, f))
+    from ..anchor.parametric import PARTS
+
+    has_lens = bool((model.mesh.face_label == PARTS.index("lens")).any())
+    if face_up == "back" and has_lens:     # settle the 180-degree twins by the dark lenses (lightness difference, 0-255)
+        for k, (px, f) in enumerate(trials):
+            con = lens_contrast(model, frames, cams, {i: f.drift[i] @ Tw[i] for i in sv}, f.T_world_cad, sv)
+            trials[k] = (px, f, con)
+        best_px = min(t[0] for t in trials)
+        near = [t for t in trials if t[0] <= best_px * 1.3 + 0.1]
+        near.sort(key=lambda t: -(t[2] if t[2] is not None else -1e9))
+        trials = near + [t for t in trials if t not in near]
+        info["candidates_lens_contrast"] = [None if t[2] is None else round(t[2], 1) for t in trials]
+        best_con = max((t[2] for t in trials if t[2] is not None), default=None)
+        if best_con is None or best_con < min_lens_contrast:
+            # no candidate puts the model's lenses on dark pixels: the device was not found (on the
+            # printed board itself the search locks onto the checker pattern, contrast -47)
+            from ..errors import FlawmapError
+
+            raise FlawmapError("DEVICE_NOT_FOUND", f"boardless: no heading puts the camera lenses on dark pixels "
+                                                   f"(lens contrast {info['candidates_lens_contrast']})")
+    else:
+        trials.sort(key=lambda x: x[0])
+    info["candidates_px"] = [round(t[0], 3) for t in trials]
+    log(f"  boardless: candidates (median px after a short fit) {info['candidates_px']}"
+        + (f", lens contrast {info['candidates_lens_contrast']}" if "candidates_lens_contrast" in info else ""))
+    # grow the time window: drift late in the recording is tens of pixels, beyond any search window,
+    # so each window starts from the drift found so far (knots past the window copy the last one)
+    fit = trials[0][1]
+    for frac in (0.4, 0.7, 1.0):
+        vs = window(frac)
+        t_end = max(times[i] for i in vs)
+        kn = fit.knots.copy()
+        last = int(np.searchsorted(kt, t_end - 1e-9))          # first knot at or beyond the window's end
+        cover = max(1, min(last, n_knots - 1))
+        kn[cover + 1:] = kn[cover]
+        fit = joint_fit(model, face_up, frames, cams, Tw, times, fit.T_world_cad, zf, vs, kt, knots_init=kn,
+                        searches=(10.0, 6.0, 4.0) if frac < 1.0 else (6.0, 4.0, 3.0, 2.5), log=log)
+    final = {i: fit.drift[i] @ Tw[i] for i in ids}
+    if polish:
+        # optional last step: each frame on its own, a few pixels from the joint fit and pulled to it.
+        # Off by default: on the synthetic wood capture it raised the median model reprojection from
+        # 0.21 to 1.14 px (max 2.45 -> 2.07); one frame's outline leaves weak directions.
+        scene = RaycastScene(model.mesh, None)
+        moved = []
+        for i in ids:
+            T_ref, st = refine_camera(scene, _grad(frames[i]), cams[i], final[i], fit.T_world_cad, final[i],
+                                      searches=(3.0, 2.0), sigma_rot_deg=0.15, sigma_mm=1.0)
+            if st is not None and st["median_px"] < 1.0:
+                moved.append(np.linalg.norm(T_ref[:3, 3] - final[i][:3, 3]))
+                final[i] = T_ref
+        info["polished"] = len(moved)
+        info["polish_move_mm_median"] = float(np.median(moved)) if moved else None
+        log(f"  boardless: polished {len(moved)}/{len(ids)} frames, median move {info['polish_move_mm_median']}")
+    c = fit.T_world_cad[:3, 3]
+    dv = np.array([_drift_vec(fit.drift[i], c) for i in ids])
+    info.update({"n_frames": len(ids), "n_knots": n_knots, "rounds": fit.rounds,
+                 "drift_mm_max": float(np.linalg.norm(dv[:, 3:], axis=1).max()),
+                 "drift_deg_max": float(np.degrees(np.linalg.norm(dv[:, :3], axis=1)).max()),
+                 "median_px": fit.rounds[-1]["median_abs_px_after"] if fit.rounds else None})
+    log(f"  boardless: ARKit drift up to {info['drift_mm_max']:.1f} mm / {info['drift_deg_max']:.2f} deg, "
+        f"outline residual {info['median_px']:.2f} px")
+    poses = CapturePoses(ids, final, {i: "model" for i in ids}, {}, T_W_ARK, {"mode": "boardless", **info})
+    return BoardlessResult(poses, fit.T_world_cad, info)

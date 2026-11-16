@@ -1,0 +1,16 @@
+# Printed capture board (A3 landscape). The device lies on the matte grey area in the middle, on its
+# printed outline, top edge towards the arrow. The ChArUco squares around it give metric camera poses;
+# the grey area keeps the black-and-white pattern away from the device edge (it would disturb the
+# edge search and reflect in the glass like cracks).
+name: a3-v1
+page_mm: [420.0, 297.0]
+squares: [16, 11]          # columns x rows
+square_mm: 25.0            # measure the printout: ``flawmap`` takes the measured value per capture
+marker_mm: 18.0
+dictionary: DICT_5X5_250
+# grey area in whole squares (0-based, inclusive): columns 5-10 and rows 1-9 -> 150 x 225 mm,
+# centred on the board, so the board centre is the world origin
+grey_cols: [5, 10]
+grey_rows: [1, 9]
+grey_rgb: [150, 150, 150]
+px_per_mm: 12              # 304.8 dpi: 25 mm squares are exactly 300 px

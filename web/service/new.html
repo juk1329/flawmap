@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>검수 요청 | flawmap</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/service/service.css">
+</head>
+<body>
+<header class="top" id="top"></header>
+<main class="wrap">
+  <section>
+    <h1 id="heading">검수 요청</h1>
+    <p class="lead" id="intro">물건을 찍은 영상을 올리면 서버가 처리해 결과 화면을 만듭니다. 결과는 확인한 뒤 누구와 나눌지 정합니다.</p>
+  </section>
+
+  <section>
+    <form class="sell" id="form" novalidate>
+      <input type="hidden" name="replaces" id="replaces">
+      <fieldset class="field cats">
+        <legend class="label">물건 종류</legend>
+        <div class="cat-row" id="cats"></div>
+      </fieldset>
+      <div class="field">
+        <label for="device">기종</label>
+        <select id="device" name="device" required></select>
+        <p class="help">휴대폰의 설정 &gt; 일반 &gt; 정보에 있는 모델 이름입니다. 모르면 '모름'을 고르세요. 촬영본에서 크기를 재서 기종을 추정하고, 맞는 도면이 없으면 잰 크기의 판 모양 모델로 확인합니다.</p>
+      </div>
+      <div class="row2">
+        <div class="field"><label for="title">물건 이름</label><input type="text" id="title" name="title" maxlength="120" placeholder="예: 업무용 아이폰 12 블랙"></div>
+        <div class="field"><label for="requester">요청자 (선택)</label><input type="text" id="requester" name="requester" maxlength="40" placeholder="이름이나 부서"></div>
+      </div>
+      <div class="field">
+        <span class="label">촬영본</span>
+        <p class="help">Stray Scanner에서 내보낸 폴더를 파일 앱에서 길게 눌러 '압축'한 zip 파일입니다. 한 면만 올려도 되지만, 올리지 않은 면은 확인하지 못한 곳으로 표시됩니다.</p>
+        <div class="drops">
+          <label class="drop" id="drop-screen"><span class="pict screen" aria-hidden="true"></span><span class="face">화면이 위로 온 촬영</span><span class="file">zip 파일을 고르거나 끌어 놓으세요</span><input type="file" name="screen" accept=".zip,application/zip"></label>
+          <label class="drop" id="drop-back"><span class="pict back" aria-hidden="true"></span><span class="face">뒷면이 위로 온 촬영</span><span class="file">zip 파일을 고르거나 끌어 놓으세요</span><input type="file" name="back" accept=".zip,application/zip"></label>
+        </div>
+      </div>
+      <div id="formMsg" hidden></div>
+      <div id="upload" hidden>
+        <p class="small" id="uploadText">올리는 중입니다.</p>
+        <div class="bar"><i id="uploadBar" style="width:0%"></i></div>
+      </div>
+      <div class="actions"><button class="btn" type="submit" id="submit">올리고 검수 시작</button></div>
+      <details class="tips">
+        <summary>촬영하는 방법</summary>
+        <ol>
+          <li>케이스와 보호 필름을 벗기고 화면을 끈 뒤 천으로 닦습니다. 지문과 먼지도 하자처럼 보일 수 있습니다.</li>
+          <li>물건과 색이 다른 바닥 위에, 고른 조명 아래 놓습니다. 직사광선, 한 점 조명, 촘촘한 무늬의 바닥은 피합니다.</li>
+          <li>LiDAR가 있는 다른 iPhone Pro나 iPad Pro의 Stray Scanner로 녹화를 시작하고, 물건이 화면 가운데에서 30–60%를 차지하게 둡니다.</li>
+          <li>낮은 각도(약 20°), 중간(45°), 높은 각도(70°)로 천천히 한 바퀴씩 돌고, 마지막에 위에서 한 번 훑습니다. 면마다 60–90초입니다.</li>
+          <li>뒤집어서 다른 면도 같은 방법으로 찍습니다. 뒷면은 카메라 렌즈가 보이게 찍어야 위아래를 구분합니다.</li>
+        </ol>
+      </details>
+    </form>
+  </section>
+
+  <section id="publicSec" hidden>
+    <h2>공개 영상으로 해 보기</h2>
+    <p class="muted">다른 사람들이 평범한 바닥에서 보통 휴대폰으로 찍은 공개 데이터(uCO3D, CC BY 4.0)입니다. 보드도, 기종 도면도 없이 처리하고, 크기는 기기 폭을 71.5 mm로 가정합니다. 물건 이름과 요청자는 위 양식을 따릅니다.</p>
+    <ul class="samples" id="publicList"></ul>
+  </section>
+
+  <section id="sampleSec" hidden>
+    <h2>가상 촬영본으로 해 보기</h2>
+    <p class="muted">정답이 있는 가상 촬영본입니다. 하자를 일부러 넣어 두어 무엇을 찾아야 하는지 압니다.</p>
+    <ul class="samples" id="samples"></ul>
+  </section>
+</main>
+<script type="module">
+import { $, esc, getJSON, topbar } from '/service/service.js';
+$('top').innerHTML = topbar('/new');
+const q = new URLSearchParams(location.search);
+if (q.get('replaces')) {
+  $('replaces').value = q.get('replaces');
+  $('heading').textContent = '다시 찍어 올리기';
+  $('intro').textContent = '새 촬영본을 올리면 새 검수 번호로 처리합니다. 처리가 끝나면 이전 결과는 "새 검수로 대체됨"이 되고, 공유 설정은 새 결과가 이어받습니다.';
+}
+const cats = await getJSON('/api/categories');
+$('cats').innerHTML = cats.map((c, i) =>
+  `<label class="cat${c.ready ? '' : ' off'}"><input type="radio" name="category" value="${esc(c.slug)}"${i === 0 ? ' checked' : ''}${c.ready ? '' : ' disabled'}>` +
+  `<span>${esc(c.name)}${c.ready ? '' : ` <small>${esc(c.note || '')}</small>`}</span></label>`).join('');
+const devices = await getJSON('/api/devices');
+$('device').innerHTML = devices.map((d) => `<option value="${esc(d.slug)}">${esc(d.name)}</option>`).join('');
+$('device').value = 'auto';
+
+for (const face of ['screen', 'back']) {
+  const drop = $(`drop-${face}`);
+  const input = drop.querySelector('input');
+  const show = () => {
+    const f = input.files[0];
+    drop.classList.toggle('has', !!f);
+    drop.querySelector('.file').textContent = f ? `${f.name} (${(f.size / 1e6).toFixed(0)} MB)` : 'zip 파일을 고르거나 끌어 놓으세요';
+  };
+  input.addEventListener('change', show);
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); input.files = e.dataTransfer.files; show(); });
+}
+
+function message(html, bad = true) {
+  const m = $('formMsg');
+  m.className = `notice${bad ? ' bad' : ''}`;
+  m.innerHTML = html;
+  m.hidden = false;
+  m.scrollIntoView({ block: 'nearest' });
+}
+
+function send(fd) {
+  $('submit').disabled = true;
+  $('upload').hidden = false;
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/inspections');
+  xhr.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    const p = Math.round((e.loaded / e.total) * 100);
+    $('uploadBar').style.width = `${p}%`;
+    $('uploadText').textContent = p < 100 ? `올리는 중입니다 (${p}%).` : '받은 파일을 확인하는 중입니다.';
+  };
+  xhr.onload = () => {
+    let r = null;
+    try { r = JSON.parse(xhr.responseText); } catch { /* not json */ }
+    if (xhr.status === 200 && r?.ok) { location.href = r.owner_url; return; }
+    $('submit').disabled = false;
+    $('upload').hidden = true;
+    if (r?.error) message(`<p><b>${esc(r.error.message)}</b></p><p>${esc(r.error.hint)}</p>`);
+    else message(`<p><b>올리지 못했습니다.</b></p><p>${esc(r?.detail || `서버 응답 ${xhr.status}`)}</p>`);
+  };
+  xhr.onerror = () => { $('submit').disabled = false; $('upload').hidden = true; message('<p><b>서버에 연결하지 못했습니다.</b> 네트워크를 확인하고 다시 올려 주세요.</p>'); };
+  xhr.send(fd);
+}
+
+function common() {
+  const fd = new FormData();
+  for (const k of ['title', 'requester', 'replaces']) fd.set(k, $(k).value);
+  fd.set('category', 'phone');
+  return fd;
+}
+
+$('form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const fd = new FormData($('form'));
+  const has = ['screen', 'back'].some((f) => fd.get(f) && fd.get(f).size);
+  if (!has) { message('<p><b>촬영본을 하나 이상 골라 주세요.</b> 화면이 위로 온 촬영과 뒷면이 위로 온 촬영 가운데 하나만 있어도 됩니다.</p>'); return; }
+  for (const f of ['screen', 'back']) if (!fd.get(f)?.size) fd.delete(f);
+  send(fd);
+});
+
+const S = await getJSON('/api/samples');
+const row = (x, btn) => `<li><span>${esc(x.title)}<br><span class="small muted">${esc(x.note || x.faces.map((f) => (f === 'back' ? '뒷면 위' : '화면 위')).join(', ') + ' 촬영')}</span></span>${btn}</li>`;
+if (S.public.length) {
+  $('publicSec').hidden = false;
+  $('publicList').innerHTML = S.public.map((x) => row(x, `<button class="btn ghost" data-public="${esc(x.name)}">이 영상으로 검수 시작</button>`)).join('');
+  for (const b of $('publicList').querySelectorAll('button')) {
+    b.addEventListener('click', () => { const fd = common(); fd.set('public', b.dataset.public); send(fd); });
+  }
+}
+if (S.synthetic.length) {
+  $('sampleSec').hidden = false;
+  $('samples').innerHTML = S.synthetic.map((x) => row(x, `<button class="btn ghost" data-sample="${esc(x.name)}">이 촬영본으로 검수 시작</button>`)).join('');
+  for (const b of $('samples').querySelectorAll('button')) {
+    b.addEventListener('click', () => { const fd = common(); fd.set('sample', b.dataset.sample); send(fd); });
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>flawmap 상태 확인</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/build/three.module.js", "three/addons/": "./vendor/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div class="app">
+  <main class="stage">
+    <header class="bar">
+      <a class="brand" href="/"><span class="mark" aria-hidden="true"></span>flawmap</a>
+      <h1 id="title">상태 확인</h1>
+      <div class="facts" id="facts"></div>
+      <div class="modes" role="tablist" aria-label="보기 방식">
+        <button role="tab" aria-selected="true" data-mode="model">3D로 보기</button>
+        <button role="tab" aria-selected="false" data-mode="spin">실제 영상으로 보기</button>
+      </div>
+    </header>
+
+    <div class="view" id="view3d">
+      <canvas id="c3d" aria-label="기기 3D 모델. 끌어서 돌리고, 빨간 번호를 누르면 하자를 봅니다."></canvas>
+      <div class="pins" id="pins"></div>
+      <p class="status" id="status3d">모델을 불러오는 중입니다.</p>
+    </div>
+
+    <div class="view" id="viewspin" hidden>
+      <div class="spinframe">
+        <img id="spinimg" alt="">
+        <canvas id="spinovl"></canvas>
+      </div>
+      <p class="hint">좌우로 끌면 기기 둘레를 돌고, 위아래로 끌면 찍은 높이가 바뀝니다. 빨간 윤곽을 누르면 그 하자를 봅니다.</p>
+      <p class="spinmeta" id="spinmeta"></p>
+      <div class="seg passes" id="spinPasses" role="group" aria-label="촬영"></div>
+    </div>
+
+    <footer class="tools">
+      <div class="seg" role="group" aria-label="보는 면">
+        <button id="viewFront">앞면</button>
+        <button id="viewBack">뒷면</button>
+        <button id="viewSide">옆면</button>
+      </div>
+      <label class="toggle"><input type="checkbox" id="showDefects" checked> 하자 영역 칠하기</label>
+      <div class="legend">
+        <span><i class="sw red"></i>하자</span>
+        <span><i class="sw hatch"></i>촬영되지 않아 확인하지 못한 곳</span>
+      </div>
+    </footer>
+  </main>
+
+  <aside class="panel">
+    <section class="svc" id="svc" hidden></section>
+    <section class="summary" id="summary"></section>
+    <section>
+      <h2>찾은 하자</h2>
+      <ol class="defects" id="defectList"></ol>
+    </section>
+    <section class="detail" id="detail" hidden>
+      <h2 id="dTitle"></h2>
+      <dl class="facts-grid" id="dFacts"></dl>
+      <h3>이 하자가 보이는 장면</h3>
+      <div class="evidence" id="dEvidence"></div>
+    </section>
+    <section class="coverage">
+      <h2>촬영된 정도</h2>
+      <div id="coverage"></div>
+    </section>
+  </aside>
+</div>
+
+<div class="modal" id="modal" hidden role="dialog" aria-modal="true" aria-labelledby="modalCap">
+  <figure>
+    <img id="modalImg" alt="">
+    <figcaption id="modalCap"></figcaption>
+  </figure>
+  <div class="modal-actions">
+    <button id="modalPlay">이 장면부터 영상 보기</button>
+    <button id="modalClose">닫기</button>
+  </div>
+</div>
+
+<div class="player" id="player" hidden>
+  <video id="video" controls playsinline preload="metadata"></video>
+  <button id="playerClose">영상 닫기</button>
+</div>
+
+<script type="module" src="viewer.js"></script>
+</body>
+</html>
