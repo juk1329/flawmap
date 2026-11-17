@@ -56,6 +56,23 @@ pip install -e . --no-deps --no-build-isolation
 
 `scripts/constraints-isaacsim.txt`는 이 환경에 고정된 버전(`numpy==1.26.0`, `psutil==5.9.8`, `torch==2.7.0+cu128`)이 추가 패키지 때문에 바뀌지 않게 합니다.
 
+### 윈도우에서 개발하기
+
+팀 서버(Ubuntu, `env_isaaclab`) 대신 윈도우 PC에서 개발할 때는 따로 만든 conda 환경 `flawmap`(Python 3.11)을 씁니다. flawmap이 쓰는 패키지는 서버와 같은 버전으로 고정했습니다(numpy 1.26.0, OpenCV 4.11, trimesh 4.5.1, fastapi 0.115.7, uvicorn 0.29.0, psutil 5.9.8).
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\setup_env.ps1        # 환경, 패키지, flawmap 명령, 환경 변수
+powershell -ExecutionPolicy Bypass -File scripts\windows\fetch_demo_data.ps1  # 가상 촬영본, 업로드 zip, three.js (-Uco3d를 주면 공개 영상도)
+conda activate flawmap
+pytest
+flawmap serve --port 8000
+```
+
+- 환경 변수: `PYTHONUTF8=1`(한글 파일), `FLAWMAP_GUARD_MIN_KB=4000000`(서비스 처리의 메모리 하한 4 GB, 서버는 8 GB).
+- 서비스 처리는 `scripts/with_memory_guard.sh` 대신 같은 일을 하는 `python -m flawmap.utils.memguard`로 돕니다. 그 밖의 `scripts/*.sh`는 윈도우에서 쓰지 않습니다.
+- torch는 지금 코드에서 쓰지 않아 넣지 않았습니다. 확장(3DGS, 검출기 학습)할 때 `pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cu128`로 넣습니다(RTX 50 시리즈는 cu128 이상).
+- 확인한 PC: Windows 11, RTX 5070 Ti 16 GB(warp GPU 레이캐스팅 동작), RAM 32 GB. 단위 시험 39개 통과, 1개는 uCO3D가 없어 건너뜀. 서비스에서 가상 촬영본 `iphone12_dent`를 별도 프로세스·메모리 감시로 끝까지 처리(87초, 찍힘 2/2, 오탐 0, 카메라 0.065°·0.23 mm)하고 3D 뷰어까지 확인.
+
 ## 4. 데이터
 
 데이터는 git에 없습니다. 애플 도면은 재배포가 금지돼 있고, 공개 데이터셋은 크고 각자의 라이선스가 있기 때문입니다. 팀 서버의 저장소 폴더 `data/`에는 아래 것이 이미 있습니다. 다른 컴퓨터에서는 아래 명령으로 받거나 서버에서 복사합니다. 데이터마다 받은 이유, 형식, 알게 된 점은 `docs/project_guide.md`(3–4절)에 자세히 있습니다.
@@ -134,7 +151,12 @@ flawmap serve --port 8000                                # http://localhost:8000
 flawmap run --device auto --pass back=...                # 기종을 모를 때: 잰 크기로 추정, 맞는 도면이 없으면 판 모양 모델
 flawmap run --device iphone-12 --poses boardless ...     # 보드가 찍혀 있어도 보드 없이 위치를 잼 (비교용)
 flawmap uco3d 59015-27660-21826 --face-up screen         # 공개 uCO3D 영상을 도면 없이 처리
+flawmap run --device auto --poses boardless --quality max --pass back=... --pass screen=...   # COLMAP 자세 보정 + 선명한 장면 우선 (느림)
+flawmap batch data/captures                              # 촬영 규격 v2 폴더(manifest.yaml) 일괄 처리, 요약 runs/batch/summary.md
+flawmap board --board configs/board_a2.yaml --size 281.6 215.5 14   # 태블릿용 A2 매트 (도면 없으면 크기로 안내선)
 ```
+
+일괄 처리용 촬영 규격(매트, 녹화 종류, `manifest.yaml` 형식)은 `docs/project_guide.md` 7.0절, 품질 기준은 `configs/batch.yaml`에 있습니다.
 
 실제 촬영본 없이 시험하려면 가상 촬영본을 만듭니다. Stray Scanner와 같은 형식에 정답(`gt.json`)이 함께 생깁니다.
 

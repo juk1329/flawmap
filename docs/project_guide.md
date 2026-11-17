@@ -117,6 +117,7 @@ pytest                                          # 단위 시험 40개, 약 1분
 
 - `scripts/constraints-isaacsim.txt`는 numpy 1.26.0, psutil 5.9.8, torch 2.7.0+cu128을 고정합니다. 새 패키지는 반드시 `pip install --dry-run -c scripts/constraints-isaacsim.txt`로 기존 패키지가 바뀌지 않는지 먼저 봅니다.
 - 실제로 `openxlab` 클라이언트는 requests, urllib3, setuptools 등을 내리려 해서 설치하지 않았습니다.
+- 윈도우 PC에서는 `env_isaaclab` 대신 conda 환경 `flawmap`을 씁니다. `scripts/windows/setup_env.ps1`로 만들고, 자세한 내용은 README의 "윈도우에서 개발하기"에 있습니다.
 
 ### 2.3 데모에 필요한 데이터만 받기
 
@@ -714,7 +715,104 @@ ISCO(커밋 a854879)에서 옮긴 것: `geometry/transforms.py`(+`se3_exp`, `pos
 
 ---
 
+### 6.11 Stray 카메라 축 규칙 (11-17 고침)
+
+- 첫 실제 촬영본(아이폰으로 찍은 아이패드 두 면)에서 확인했습니다. Stray Scanner의 `odometry.csv` 자세는 **이미 OpenCV 카메라 축**(x 오른쪽, y 아래, z 앞)입니다.
+- 그런데 `flawmap/io/stray.py`는 여기에 ARKit 축을 바꾸는 `diag(1, -1, -1)`을 한 번 더 곱하고 있었습니다. 가상 촬영본은 같은 뒤집기를 거꾸로 적용해 썼기 때문에 시험에서는 드러나지 않았습니다.
+- 증거: 장면마다 LiDAR로 바닥 평면을 맞춰 바닥 법선을 비교했습니다. 뒤집기를 빼면 법선이 1.3° 안에서 일치하고 ARKit 위쪽(+y)을 향합니다. 뒤집기를 넣으면 25–27° 흩어집니다.
+- 고친 것: `ARKIT_TO_CV_CAM`(읽기)과 `CV_TO_ARKIT_CAM`(가상 촬영본 쓰기)을 둘 다 단위 행렬로 바꿨습니다. 실제 녹화 발췌(`tests/data/stray_floor/`, 자세와 깊이 8장)로 `tests/unit/test_stray_convention.py`가 이 규칙을 고정합니다.
+- **고치기 전에 만든 가상 촬영본(`data/synthetic/`)과 그 zip은 새 규칙과 맞지 않습니다.** 서버에서도 다시 만들어야 합니다(`scripts/fetch_demo_data.sh`는 `gt.json`이 있으면 건너뛰므로, 해당 폴더를 지우고 돌립니다).
+
+### 6.12 일괄 처리 `flawmap batch` (11-17)
+
+촬영 규격 v2(7.0절)로 찍은 기기 폴더를 사람의 판단 없이 처리합니다. 무엇을 넣고, 어떻게 처리하고, 결과를 언제 받아들일지는 기기 폴더의 `manifest.yaml`과 `configs/batch.yaml`(품질 기준)이 정합니다. 기준 파일의 해시가 요약에 남아서, 같은 입력과 기준이면 같은 판정이 나옵니다.
+
+```bash
+flawmap batch data/captures                 # manifest.yaml이 있는 기기 폴더 전부
+flawmap batch data/captures/<기기> --force  # 하나만, 이미 있는 결과도 다시
+```
+
+| 단계 | 하는 일 | 미달이면 |
+|---|---|---|
+| 받기 검사 | 녹화마다 길이(궤도 45초 이상), 기기 둘레를 돈 비율(75% 이상), LiDAR 깊이 | `recapture`: 처리하지 않고 이유를 남김 |
+| 처리 | 궤도 녹화를 `pipeline.run`에 넣음. 매트가 A3/A2면 보드로, `none`이면 보드 없이 위치를 잡음. 기종 `auto`면 바닥 모자이크로 판 크기를 재고(`anchor/floor_outline.py`) 도면과 대조 | 촬영 문제(`FlawmapError`)는 `recapture`, 그 밖의 오류는 `failed` |
+| 결과 검사 | 면마다 외곽 잔차 1 px 이하, 커버리지(두 면 90%, 한 면 50%), 매트를 썼으면 보드로 위치를 잡았는지 | `warn`: 결과는 남기고 이유를 적음 |
+
+결과는 `runs/batch/<이름>/`(평소 결과 폴더, 뷰어 묶음 포함)에, 요약은 `runs/batch/summary.json`과 `summary.md`(기기마다 한 줄: 상태, 기종, 크기, 하자 수, 커버리지, 외곽 잔차, 위치 방식, 이유)에 남습니다. 문제가 있는 기기(`recapture`, `failed`)가 하나라도 있으면 종료 코드가 1입니다. 시험: `tests/unit/test_batch.py`.
+
+**도면 없는 기기(태블릿)를 위해 함께 고친 것** (실제 아이패드 촬영본에서 발견):
+- `anchor/floor_outline.py`(새 파일): LiDAR 바닥 + 바닥 투영 모자이크로 크기·모서리·위치·방향을 잼. 바닥에서 다른 녹화가 깨끗하게 잰 모양을 고정해 그림자 번짐을 막고, 윗면 높이(두께)는 무늬 있는 면에서 재서 나눠 씀.
+- `poses/boardless.py`: 바닥 높이를 광축이 모이는 점이 아닌 카메라 아래에서 찾음(광축이 덜 모이면 그 점이 바닥보다 80–270 mm 아래로 감). 측정한 판의 자세를 후보로 먼저 시도.
+- `surface/maps.py`: 큰 면은 텍셀을 키움(면당 300만 개 이하; 13인치 태블릿 0.15 mm).
+- `anchor/template.py`: 모서리 반경 후보를 크기에 맞춤.
+
+### 6.13 텍스처 선명도와 `--quality max` (11-17)
+
+첫 실제 촬영본(아이패드 뒷면)의 텍스처가 흐렸습니다. 원인을 재기 위해, 로고 부근 75 × 80 mm를 장면마다 0.1 mm로 펴서 비교했습니다. 선명도는 경사 에너지입니다.
+
+| 합치는 방식 | 지금 자세(ARKit + 외곽선) | COLMAP 자세 |
+|---|---|---|
+| 모든 장면의 중앙값 (원래 방식) | 17 | 21 |
+| 선명한 장면 20%만 | 122 | 173 |
+| 선명한 장면만 + 장면끼리 2D 정렬 | 193 | 210 |
+| 가장 선명한 한 장 | 509 | 510 |
+
+- **주원인은 흔들린 장면입니다.** 17–21초에 한 바퀴를 돌아서 장면들의 선명도 중간값이 가장 선명한 장면의 1/5이었고, 중앙값으로 합치면 디테일이 사라졌습니다. COLMAP으로 정렬해도 모든 장면을 섞으면 흐립니다(17 → 21).
+- **두 번째 원인은 면 안쪽의 장면 간 어긋남입니다.** 외곽선은 0.2 mm로 맞는데도 장면끼리 중간값 2.1 mm, 상위 10% 7 mm가 어긋났습니다. ARKit 흐름을 시간에 대해 부드러운 곡선으로 보정하기 때문입니다. COLMAP(바닥 무늬로 번들 조정)은 101장을 모두 정렬했고(0.76 px), 장면 간 어긋남을 상위 10% 기준 2.6 mm로 줄였습니다.
+
+`--quality max`(일괄 처리 기본값, `configs/batch.yaml`의 `process.refine`, `process.sharp_views`)는 다음 두 가지를 켭니다.
+1. **COLMAP 자세 보정**(`poses/colmap.py`): 보드 없는 경로 뒤에 키프레임으로 SIFT, 전수 매칭, 번들 조정을 합니다. 내부 파라미터는 Stray 값으로 고정합니다. 카메라 중심 기준 닮음 변환으로 같은 좌표계에 옮기고, 기기를 다시 정합합니다. 등록률 80% 미만, 재투영 1.5 px 초과, 카메라 중심 차 30 mm 초과면 쓰지 않습니다. 실패해도 처리는 계속됩니다.
+2. **선명한 장면 우선**(`surface/maps.py`의 `prefer_sharp_views`): 면마다 장면별 선명도를 그 장면이 본 텍셀에서 잽니다(같은 영역 평균 이미지 대비 비율). 상위 30%만 남기고, 선명한 장면이 3개 미만인 텍셀은 모든 장면을 씁니다. 텍스처, 검출, 커버리지가 모두 이 선택을 따릅니다.
+
+이 데이터의 한계: 가장 선명한 한 장과는 아직 2.5배 차이가 납니다. 선명한 장면이 적고 근접 녹화가 없기 때문입니다. 촬영 규격 v2(면마다 60–90초를 천천히, 15–20 cm 근접 녹화)가 그 차이를 줄이는 쪽입니다.
+
+---
+
 ## 7. 촬영 안내 (팀용)
+
+### 7.0 촬영 규격 v2 — 일괄 처리용 (11-17)
+
+`flawmap batch`가 사람의 판단 없이 처리할 수 있도록 촬영 조건을 고정합니다. 실제 촬영본(아이패드)에서 생긴 문제는 대부분 조건이 매번 달라서였습니다. 찍는 사람의 그림자, ARKit 흐름 최대 30 mm, 위에서만 내려다본 촬영, 17–21초짜리 짧은 녹화가 그 예입니다.
+
+| 항목 | 규격 |
+|---|---|
+| 매트 | 휴대폰은 A3 보드(`configs/board_a3.yaml`), 태블릿은 **A2 매트**(`configs/board_a2.yaml`, 회색 영역 275 × 300 mm). 무광 용지에 실제 크기(100%)로 인쇄하고, 칸 크기(25 mm)를 자로 재서 `manifest.yaml`의 `square_mm`에 적습니다 |
+| 매트 만들기 | 도면이 있는 기종은 `flawmap board --device iphone-12`, 도면이 없으면 `flawmap board --board configs/board_a2.yaml --size 281.6 215.5 14`(길이, 폭, 모서리 반경 mm)로 놓을 자리를 인쇄합니다 |
+| 놓기 | 회색 영역의 외곽선에 맞추고, 기기 윗부분(수화부·카메라 쪽)이 화살표를 향하게 둡니다 |
+| 조명 | 천장 조명처럼 고른 빛. 찍는 사람의 그림자가 매트에 지지 않게 조명을 등지지 않습니다 |
+| 기기 상태 | 케이스·필름을 벗기고, 화면을 끄고, 마른 천으로 닦습니다 |
+| 녹화 앱 | Stray Scanner(LiDAR가 있는 iPhone Pro / iPad Pro), 깊이·신뢰도 기록 켜기 |
+
+**면마다 녹화 두 개**(화면 위, 뒷면 위 → 모두 네 개):
+
+| 녹화 | 하는 법 | 쓰는 곳 |
+|---|---|---|
+| `orbit` | 기기가 화면의 30–60%(휴대폰 25–35 cm, 태블릿 40–60 cm), 낮은(20°)·중간(45°)·높은(70°) 높이로 한 바퀴씩, 마지막에 위에서 한 번. **60–90초** | 카메라 위치, 형상, 커버리지 |
+| `close` | **15–20 cm**까지 다가가 면을 지그재그로 천천히 훑고, 테두리를 따라 한 바퀴. 30–60초 | 흠집 해상도(약 0.12 mm/픽셀) |
+
+**폴더와 `manifest.yaml`**: 기기 하나에 폴더 하나입니다. Stray 녹화 폴더를 그 안에 이름을 바꿔 넣습니다.
+
+```
+data/captures/<기기 이름>/
+  manifest.yaml
+  screen_orbit/  screen_close/  back_orbit/  back_close/     (Stray Scanner 폴더 그대로)
+  gt.yaml                                                     (선택: 실제 하자 기록, 7.5절)
+```
+
+```yaml
+name: ipad-pro13-silver        # 결과 폴더 이름
+device: auto                   # configs/devices의 기종(slug), 모르면 auto
+board: a2                      # a3 | a2 | none (매트 없이 찍었을 때)
+square_mm: 25.0                # 인쇄한 매트의 칸을 잰 값
+passes:
+  - {face: screen, kind: orbit, path: screen_orbit}
+  - {face: back,   kind: orbit, path: back_orbit}
+  - {face: screen, kind: close, path: screen_close}
+  - {face: back,   kind: close, path: back_close}
+```
+
+- 처리: `flawmap batch data/captures`(기기 폴더 여럿) 또는 `flawmap batch data/captures/<기기>`. 품질 기준은 `configs/batch.yaml`에 있고, 결과와 요약표는 `runs/batch/`에 남습니다(6.12절).
+- `close` 녹화는 지금은 받기 검사만 하고 처리에는 넣지 않습니다. 근접 텍스처 단계가 생기면 씁니다.
 
 ### 7.1 준비물
 

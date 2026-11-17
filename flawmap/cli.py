@@ -15,8 +15,16 @@ def cmd_board(args: argparse.Namespace) -> int:
     if args.device:
         dev = DeviceSpec.by_slug(args.device)
         outline, name = build_device_model(dev).outline_xy, dev.name
+    elif args.size:
+        # no drawing: a rounded rectangle of the measured length, width and corner radius as the guide
+        from .anchor.template import template_spec
+
+        L, W = args.size[0], args.size[1]
+        r = args.size[2] if len(args.size) > 2 else 0.06 * W
+        outline, name = build_device_model(template_spec(L, W, 6.0, r)).outline_xy, f"{L:.1f} x {W:.1f} mm"
     page = render_board_page(spec, outline, name)
-    out = Path(args.out or f"runs/board/board_{spec.name}_{args.device or 'blank'}.pdf")
+    tag = args.device or ("x".join(f"{v:g}" for v in args.size[:2]) if args.size else "blank")
+    out = Path(args.out or f"runs/board/board_{spec.name}_{tag}.pdf")
     save_board_pdf(page, out, spec)
     print(f"wrote {out} ({spec.page_mm[0]:.0f} x {spec.page_mm[1]:.0f} mm) and {out.with_suffix('.preview.png')}")
     return 0
@@ -32,7 +40,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             raise SystemExit(f"--pass expects screen=PATH or back=PATH, got {spec!r}")
         passes.append(PassInput(Path(path), face))
     out = Path(args.out or f"runs/{args.device}_{Path(passes[0].root).name}")
-    rep = run(passes, args.device, out, keyframes=args.keyframes, board_square_mm=args.square_mm, poses=args.poses)
+    best = args.quality == "max"
+    rep = run(passes, args.device, out, keyframes=args.keyframes, board_square_mm=args.square_mm, poses=args.poses,
+              board_path=args.board, refine="colmap" if best else None, sharp_views=best, segment=best)
     print(f"{len(rep['defects'])} defects, coverage {rep['coverage']['overall']:.1%}, {rep['timing_s']['total']:.0f}s -> {out / 'bundle'}")
     return 0
 
@@ -64,6 +74,16 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_batch(args: argparse.Namespace) -> int:
+    from .batch import main_summary, run_batch
+    from .utils.logging import add_file_handler
+
+    add_file_handler(Path(args.out) / "batch.log")
+    summary = run_batch(Path(args.root), Path(args.out), Path(args.gates) if args.gates else None, force=args.force)
+    print(f"summary: {Path(args.out) / 'summary.md'}")
+    return main_summary(summary)
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from .server.app import serve
 
@@ -78,7 +98,9 @@ def main(argv: list[str] | None = None) -> int:
 
     b = sub.add_parser("board", help="write the printable A3 capture board (PDF)")
     b.add_argument("--device", help="device slug in configs/devices (prints its outline on the grey area)")
-    b.add_argument("--board", help="board YAML (default configs/board_a3.yaml)")
+    b.add_argument("--board", help="board YAML (default configs/board_a3.yaml; tablets: configs/board_a2.yaml)")
+    b.add_argument("--size", type=float, nargs="+", metavar="MM",
+                   help="no drawing: print a rounded-rectangle guide of LENGTH WIDTH [CORNER_RADIUS] mm")
     b.add_argument("--out", help="output PDF path")
     b.set_defaults(func=cmd_board)
 
@@ -91,6 +113,11 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--square-mm", type=float, help="measured board square size of the printout (default 25.0)")
     r.add_argument("--poses", default="auto", choices=["auto", "board", "boardless"],
                    help="camera poses from the printed board, without it (ARKit + model outline), or whichever fits (default)")
+    r.add_argument("--board", help="board YAML (default configs/board_a3.yaml; tablets: configs/board_a2.yaml)")
+    r.add_argument("--quality", default="standard", choices=["standard", "max"],
+                   help="max: SAM 2 device masks to check the registration and keep floor out of the texture, COLMAP "
+                        "refinement of boardless poses, textures and detections from the sharpest views "
+                        "(slower; needs torch, sam2 and pycolmap)")
     r.set_defaults(func=cmd_run)
 
     u = sub.add_parser("uco3d", help="process a public uCO3D phone video without a reference drawing (fitted plate model)")
@@ -108,6 +135,13 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--square-mm", type=float)
     c.add_argument("--out")
     c.set_defaults(func=cmd_check)
+
+    bt = sub.add_parser("batch", help="process every device folder with a manifest.yaml (capture spec v2) with fixed gates")
+    bt.add_argument("root", help="a device folder with manifest.yaml, or a folder of them (e.g. data/captures)")
+    bt.add_argument("--out", default="runs/batch", help="results and summary.json / summary.md (default runs/batch)")
+    bt.add_argument("--gates", help="gate config (default configs/batch.yaml)")
+    bt.add_argument("--force", action="store_true", help="process again even when a result exists")
+    bt.set_defaults(func=cmd_batch)
 
     s = sub.add_parser("serve", help="inspection service (upload, queue, seller and buyer pages) and the viewer")
     s.add_argument("--runs", default="runs", help="development runs shown at /?run=<name>")

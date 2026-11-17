@@ -1,0 +1,30 @@
+# Windows development environment (conda env `flawmap`, Python 3.11).
+# Mirrors the versions of the team server's `env_isaaclab` where flawmap uses them
+# (docs/project_guide.md 2.1). Installed by scripts/windows/setup_env.ps1 together with
+# scripts/constraints-isaacsim.txt, so numpy stays at 1.26.0 like the server.
+numpy==1.26.0
+scipy
+opencv-python-headless==4.11.0.86
+open3d
+warp-lang
+trimesh==4.5.1
+manifold3d
+pydantic>=2
+pyyaml
+rich
+pillow
+imageio
+imageio-ffmpeg
+scikit-image
+plyfile
+fastapi==0.115.7
+uvicorn==0.29.0
+python-multipart
+httpx
+requests
+psutil==5.9.8
+gdown
+remotezip
+huggingface_hub
+pytest
+pycolmap==4.2.1          # --quality max (COLMAP pose refinement); same version as the team server

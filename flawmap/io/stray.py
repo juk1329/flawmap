@@ -12,6 +12,7 @@ frame would not match them. The decoded size is checked against the principal po
 from __future__ import annotations
 
 import csv
+import functools
 import json
 import subprocess
 from dataclasses import dataclass, field
@@ -22,7 +23,11 @@ import numpy as np
 from ..geometry.camera import Camera
 from ..geometry.transforms import make_T
 
-ARKIT_TO_CV_CAM = np.diag([1.0, -1.0, -1.0, 1.0])
+# Stray Scanner's odometry.csv already stores world <- camera in the OpenCV convention (x right,
+# y down, z forward), not ARKit's camera axes (y up, z back). Checked on two real iPhone recordings
+# (2026-11-17): with this identity the per-frame LiDAR floor normals agree within 1.3 deg and point
+# along ARKit's up axis; with the former diag(1, -1, -1) they scattered by 27 deg.
+ARKIT_TO_CV_CAM = np.eye(4)
 
 
 @dataclass
@@ -47,14 +52,31 @@ class StrayCapture:
     def depth(self, i: int) -> np.ndarray | None:
         import cv2
 
+        from ..utils.image import imread
+
         p = self.root / "depth" / f"{self.frame_ids[i]}.png"
-        return cv2.imread(str(p), cv2.IMREAD_UNCHANGED) if p.exists() else None
+        return imread(p, cv2.IMREAD_UNCHANGED) if p.exists() else None
 
     def confidence(self, i: int) -> np.ndarray | None:
         import cv2
 
+        from ..utils.image import imread
+
         p = self.root / "confidence" / f"{self.frame_ids[i]}.png"
-        return cv2.imread(str(p), cv2.IMREAD_UNCHANGED) if p.exists() else None
+        return imread(p, cv2.IMREAD_UNCHANGED) if p.exists() else None
+
+
+@functools.lru_cache(maxsize=None)
+def _passthrough_args(exe: str) -> tuple[str, ...]:
+    """Keep every decoded frame (no duplicates or drops): ``-fps_mode passthrough`` since ffmpeg
+    5.1; ``-vsync 0`` before that (removed in newer ffmpeg, e.g. the 9.x of imageio-ffmpeg 0.8)."""
+    probe = [exe, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "nullsrc=s=16x16:d=0.04",
+             "-fps_mode", "passthrough", "-f", "null", "-"]
+    try:
+        ok = subprocess.run(probe, capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    return ("-fps_mode", "passthrough") if ok else ("-vsync", "0")
 
 
 def _ffprobe_like(video: Path) -> dict:
@@ -126,7 +148,7 @@ def iter_frames(video: str | Path, indices: list[int] | None = None, scale: floa
     if scale != 1.0:
         w, h = int(round(w * scale)), int(round(h * scale))
     exe = imageio_ffmpeg.get_ffmpeg_exe()
-    cmd = [exe, "-hide_banner", "-loglevel", "error", "-noautorotate", "-i", str(video), "-vsync", "0"]
+    cmd = [exe, "-hide_banner", "-loglevel", "error", "-noautorotate", "-i", str(video), *_passthrough_args(exe)]
     if scale != 1.0:
         cmd += ["-vf", f"scale={w}:{h}:flags=area"]
     cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]

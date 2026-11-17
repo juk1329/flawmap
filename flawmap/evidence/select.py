@@ -23,6 +23,7 @@ from scipy import ndimage as ndi
 from ..geometry.camera import Camera
 from ..geometry.transforms import inv_T
 from ..surface.maps import ChartMaps, lab_of
+from ..utils.image import imwrite
 
 
 @dataclass
@@ -134,11 +135,11 @@ def render_evidence(img: np.ndarray, px: np.ndarray, out_crop, out_full, crop_px
         cv2.polylines(crop, [(p - [bx0, by0]).astype(np.int32)], True, (230, 30, 30), th, cv2.LINE_AA)
     sc = crop_px / max(crop.shape[1], 1)
     crop = cv2.resize(crop, (crop_px, max(int(round(crop.shape[0] * sc)), 1)), interpolation=cv2.INTER_AREA if sc < 1 else cv2.INTER_CUBIC)
-    cv2.imwrite(str(out_crop), cv2.cvtColor(crop, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 90])
+    imwrite(str(out_crop), cv2.cvtColor(crop, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 90])
     full = img.copy()
     pad = int(0.25 * half)
     cv2.rectangle(full, (int(x0) - pad, int(y0) - pad), (int(x1) + pad, int(y1) + pad), (230, 30, 30), max(3, w // 400), cv2.LINE_AA)
     fs = full_w / w
     full = cv2.resize(full, (full_w, int(round(h * fs))), interpolation=cv2.INTER_AREA)
-    cv2.imwrite(str(out_full), cv2.cvtColor(full, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    imwrite(str(out_full), cv2.cvtColor(full, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
     return {"bbox_px": [float(x0), float(y0), float(x1), float(y1)], "crop_box": [bx0, by0, bx1, by1]}

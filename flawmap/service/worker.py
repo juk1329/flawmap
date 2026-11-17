@@ -23,10 +23,26 @@ log = get_logger("flawmap.service")
 
 def pid_alive(pid: int) -> bool:
     try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ValueError):
+        pid = int(pid)
+    except (TypeError, ValueError):
         return False
+    if os.name == "nt":   # os.kill(pid, 0) would terminate the process on Windows
+        import psutil
+
+        return psutil.pid_exists(pid)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def memory_guard_cmd() -> list[str]:
+    """Prefix that runs a command under the memory guard: the shell script where it works (Linux),
+    the Python twin elsewhere (Windows has no bash ``setsid`` or ``/proc/meminfo``)."""
+    if os.name == "nt":
+        return [sys.executable, "-m", "flawmap.utils.memguard"]
+    return ["bash", str(repo_root() / "scripts" / "with_memory_guard.sh")]
 
 
 class Worker(threading.Thread):
@@ -72,8 +88,7 @@ class Worker(threading.Thread):
             return
         jdir = self.store.dir(iid)
         logf = open(jdir / "job.log", "ab")
-        cmd = ["bash", str(repo_root() / "scripts" / "with_memory_guard.sh"), sys.executable, "-m", "flawmap.service.job",
-               str(self.store.root.resolve()), iid]
+        cmd = [*memory_guard_cmd(), sys.executable, "-m", "flawmap.service.job", str(self.store.root.resolve()), iid]
         env = dict(os.environ, PYTHONPATH="")
         t0 = time.time()
         p = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd=str(repo_root()), env=env)

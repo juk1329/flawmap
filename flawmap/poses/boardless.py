@@ -88,7 +88,11 @@ def floor_height(cap, ids: list[int], T_world_cam: dict[int, np.ndarray], centre
     if not zs or sum(len(z) for z in zs) < 500:
         return None
     z = np.concatenate(zs)
-    lo, hi = centre[2] - 200.0, centre[2] + 60.0
+    # the axes' meeting point can land far below the floor when they converge weakly (an iPad filmed
+    # from 40 cm: 80 mm below; filmed from above: 270 mm below, 2026-11-17). The floor lies below
+    # every camera, so search from 1 m under the lowest camera up to just under it; the mode wins
+    cam_z = min(float(T_world_cam[i][2, 3]) for i in ids)
+    lo, hi = min(centre[2] - 200.0, cam_z - 1000.0), max(centre[2] + 200.0, cam_z - 30.0)
     z = z[(z > lo) & (z < hi)]
     if len(z) < 500:
         return None
@@ -395,8 +399,10 @@ def joint_fit(model, face_up: str, frames: dict[int, np.ndarray], cams: dict[int
 
 def boardless_poses(cap, frames: dict[int, np.ndarray], cams: dict[int, Camera], model, face_up: str,
                     n_search_views: int = 12, early_share: float = 0.3, n_fit_views: int = 48, polish: bool = False,
-                    min_lens_contrast: float = 15.0, log=print) -> BoardlessResult:
-    """Camera poses (mm, a z-up world tied to the first part of the recording) for ``frames``."""
+                    min_lens_contrast: float = 15.0, plate=None, log=print) -> BoardlessResult:
+    """Camera poses (mm, a z-up world tied to the first part of the recording) for ``frames``.
+    ``plate`` (``anchor.floor_outline.FloorPlate``) adds the device's measured pose on the floor to the
+    candidates; for a fitted plate model (no drawing) it is measured here when not given."""
     ids = sorted(frames)
     Tw = {i: T_W_ARK @ cap.T_ark_cam[i] for i in ids}
     times = {i: float(cap.timestamps[i] - cap.timestamps[0]) for i in ids}
@@ -413,6 +419,21 @@ def boardless_poses(cap, frames: dict[int, np.ndarray], cams: dict[int, Camera],
     log(f"  boardless: optical axes meet at {np.round(centre, 1)} mm; floor z {z_search:.1f} mm ({info['floor_from']})")
     sv = [early[int(k)] for k in np.linspace(0, len(early) - 1, min(n_search_views, len(early))).round()]
     cands = find_device(model, face_up, frames, cams, Tw, centre, z_search, sv, log=log)
+    if zf is not None and (plate is not None or model.spec.raw.get("template")):
+        # the outline search looks within a few cm of where the cameras aimed, sized for phones;
+        # the floor mosaic finds a device of any size, so its pose is tried first
+        if plate is None:
+            from ..anchor.floor_outline import measure_plate
+
+            plate = measure_plate(frames, cams, Tw, zf, centre[:2], log=log)
+        if plate is not None:
+            R0 = rest_pose(model, face_up)              # long side along world +y before the heading
+            yaw = plate.long_axis_deg - 90.0
+            # only the measured pose (and its 180-degree twin): with the outline search's candidates
+            # in the race, a pose turned 90 degrees onto floor-board seams won by 0.01 px on the iPad
+            # screen pass (all candidates 1.83-1.87 px after the short fit, 2026-11-17)
+            cands = [make_T(rot_z(yaw + tw), [plate.centre_xy[0], plate.centre_xy[1], zf]) @ R0 for tw in (0.0, 180.0)]
+            info["floor_plate"] = plate.info
     fit_views = [ids[int(k)] for k in np.linspace(0, len(ids) - 1, min(n_fit_views, len(ids))).round()]
     n_knots = int(np.clip(round(len(ids) / 30), 3, 6))
     t_lo, t_hi = min(times.values()), max(times.values())

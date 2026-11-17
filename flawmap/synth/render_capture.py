@@ -31,6 +31,7 @@ from ..geometry.camera import Camera
 from ..geometry.transforms import inv_T, look_at_opencv, make_T, rot_z, se3_exp
 from ..poses.board import BoardSpec, render_board_page
 from ..surface.raycast import RaycastScene
+from ..utils.image import imwrite
 from ..utils.io import write_json
 
 
@@ -337,7 +338,7 @@ def render_frame(model: DeviceModel, scene: RaycastScene, tex: dict, colors: dic
 
 # ----------------------------------------------------------------------------- ARKit convention
 T_ARK_WORLD_BASE = make_T(np.array([[1.0, 0, 0], [0, 0, 1.0], [0, -1.0, 0]]))   # board z-up -> ARKit y-up
-CV_TO_ARKIT_CAM = np.diag([1.0, -1.0, -1.0, 1.0])
+CV_TO_ARKIT_CAM = np.eye(4)   # Stray writes OpenCV camera axes (see flawmap.io.stray.ARKIT_TO_CV_CAM)
 
 
 def write_stray(out: Path, cam: Camera, frames: list[np.ndarray], depths: list[np.ndarray], T_ark_cam: list[np.ndarray],
@@ -361,8 +362,8 @@ def write_stray(out: Path, cam: Camera, frames: list[np.ndarray], depths: list[n
         rows.append(f"{i / fps:.6f}, {i:06d}, {x:.6f}, {y:.6f}, {z:.6f}, {q[0]:.8f}, {q[1]:.8f}, {q[2]:.8f}, {q[3]:.8f}, "
                     f"{cam.fx:.4f}, {cam.fy:.4f}, {cam.cx:.4f}, {cam.cy:.4f}, , ")
         small = cv2.resize(dmap, (256, 192), interpolation=cv2.INTER_NEAREST)
-        cv2.imwrite(str(out / "depth" / f"{i:06d}.png"), np.clip(small, 0, 65535).astype(np.uint16))
-        cv2.imwrite(str(out / "confidence" / f"{i:06d}.png"), np.full((192, 256), 2, np.uint8))
+        imwrite(str(out / "depth" / f"{i:06d}.png"), np.clip(small, 0, 65535).astype(np.uint16))
+        imwrite(str(out / "confidence" / f"{i:06d}.png"), np.full((192, 256), 2, np.uint8))
     (out / "odometry.csv").write_text("\n".join(rows) + "\n")
     np.savetxt(out / "camera_matrix.csv", cam.K, delimiter=",", fmt="%.6f")
     (out / "imu.csv").write_text("timestamp, a_x, a_y, a_z, alpha_x, alpha_y, alpha_z\n")

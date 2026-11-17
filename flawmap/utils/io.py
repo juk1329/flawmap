@@ -30,7 +30,7 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
     os.replace(tmp, path)
 
@@ -40,14 +40,14 @@ def write_json(path: str | Path, obj: Any, indent: int | None = 2) -> None:
 
 
 def read_json(path: str | Path) -> Any:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
 def append_jsonl(path: str | Path, obj: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as f:
+    with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, cls=_Enc, ensure_ascii=False) + "\n")
 
 
@@ -56,7 +56,7 @@ def read_jsonl(path: str | Path) -> list[Any]:
     if not path.exists():
         return []
     out = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -65,7 +65,7 @@ def read_jsonl(path: str | Path) -> list[Any]:
 
 
 def read_yaml(path: str | Path) -> Any:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

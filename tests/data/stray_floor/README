@@ -1,0 +1,3 @@
+Excerpt of a real Stray Scanner recording (iPhone, 2026-11-17): an iPad lying on a wood floor,
+8 odometry rows and their 256x192 LiDAR depth maps (mm). No RGB. Used by tests/unit/test_stray_convention.py
+to pin the camera-axis convention of odometry.csv.

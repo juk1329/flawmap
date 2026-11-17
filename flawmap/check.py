@@ -24,6 +24,7 @@ from .geometry.transforms import inv_T
 from .io.stray import iter_frames, read_stray
 from .poses.align import estimate_poses
 from .poses.board import BoardDetector, BoardSpec
+from .utils.image import imwrite
 from .utils.io import write_json
 
 BANDS = [(0, 30), (30, 50), (50, 70), (70, 91)]
@@ -118,6 +119,6 @@ def check_capture(root: str | Path, out: str | Path, device: str | None = None, 
                 if bp is not None:
                     for x, y in bp.image_pts:
                         cv2.circle(img, (int(x), int(y)), 4, (250, 220, 0), 1, cv2.LINE_AA)
-                cv2.imwrite(str(out / f"overlay_elev{lo:02d}_{i:06d}.jpg"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 88])
+                imwrite(str(out / f"overlay_elev{lo:02d}_{i:06d}.jpg"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 88])
     write_json(out / "report.json", rep)
     return rep

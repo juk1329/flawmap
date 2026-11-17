@@ -108,7 +108,7 @@ def _page(name: str) -> FileResponse:
 
 
 def _viewer_html(config: dict | None = None) -> HTMLResponse:
-    html = (repo_root() / "web" / "index.html").read_text()
+    html = (repo_root() / "web" / "index.html").read_text(encoding="utf-8")
     inject = '<base href="/">'
     if config is not None:
         inject += "<script>window.FLAWMAP = " + json.dumps(config, ensure_ascii=False).replace("</", "<\\/") + ";</script>"
@@ -152,7 +152,7 @@ def create_app(runs_dir: Path, data_dir: Path | None = None, start_worker: bool 
         out = []
         for d in sorted(runs_dir.glob("*/bundle/defects.json")):
             try:
-                j = json.loads(d.read_text())
+                j = json.loads(d.read_text(encoding="utf-8"))
             except Exception:
                 continue
             name = d.parent.parent.name
@@ -261,7 +261,7 @@ def create_app(runs_dir: Path, data_dir: Path | None = None, start_worker: bool 
     def shared_result(share: str):
         d = store.by_share(share)
         if d is None or not shared(d):
-            return HTMLResponse((repo_root() / "web" / "service" / "unavailable.html").read_text(), status_code=404)
+            return HTMLResponse((repo_root() / "web" / "service" / "unavailable.html").read_text(encoding="utf-8"), status_code=404)
         return _viewer_html({"bundle": f"/r/{share}/bundle/", "role": "viewer", "back": "/gallery" if d.get("listed") else "/",
                              "inspection": report_public(d)})
 
@@ -415,7 +415,7 @@ def seed_demo(store, runs_dir: Path, names: dict[str, dict]) -> list[str]:
                          source="demo", status="done", run_dir=str(rd), published=True, listed=True)
         s = summarize(rd)
         store.update(d["id"], summary=s, finished=time.time(), started=time.time() - (s.get("seconds") or 0),
-                     n_passes=len(json.loads((rd / "run.json").read_text()).get("passes", [])))
+                     n_passes=len(json.loads((rd / "run.json").read_text(encoding="utf-8")).get("passes", [])))
         added.append(d["id"])
     return added
 

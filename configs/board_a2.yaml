@@ -1,0 +1,17 @@
+# Printed capture mat for tablets (A2 landscape, capture spec v2). Same pattern and frame as the A3
+# board: the device lies on the matte grey area, top edge towards the arrow, long side along the
+# arrow. Grey area 275 x 300 mm (11 x 12 squares) fits a 13-inch iPad (215.5 x 281.6 mm) with
+# ~30 mm to spare on each side; the ChArUco ring around it is 2 to 6 squares wide.
+# DICT_5X5_250 covers the 184 markers of a 23 x 16 board.
+name: a2-v1
+page_mm: [594.0, 420.0]
+squares: [23, 16]          # columns x rows
+square_mm: 25.0            # measure the printout: ``flawmap`` takes the measured value per capture
+marker_mm: 18.0
+dictionary: DICT_5X5_250
+# grey area in whole squares (0-based, inclusive): columns 6-16 and rows 2-13 -> 275 x 300 mm,
+# centred on the board, so the board centre is the world origin
+grey_cols: [6, 16]
+grey_rows: [2, 13]
+grey_rgb: [150, 150, 150]
+px_per_mm: 12              # 304.8 dpi: 25 mm squares are exactly 300 px

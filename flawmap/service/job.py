@@ -98,9 +98,11 @@ def process(store: Store, iid: str, runner=None, public_runner=None) -> dict:
             rep = public_runner(p0["name"], Path(d["run_dir"]), face_up=p0["face_up"], progress=progress, meta=meta, **kw)
         else:
             rep = runner(passes, d["device"], Path(d["run_dir"]), progress=progress, meta=meta)
-        store.update(iid, status="done", stage="bundle", progress=1.0, finished=time.time(), summary=summarize(Path(d["run_dir"])),
-                     pid=None)
+        summary = summarize(Path(d["run_dir"]))
+        # carry the earlier inspection's title and sharing over before the result shows as done,
+        # so nobody sees a finished re-shoot without them
         finish_superseding(store, d)
+        store.update(iid, status="done", stage="bundle", progress=1.0, finished=time.time(), summary=summary, pid=None)
         return rep
     except FlawmapError as e:
         store.update(iid, status="failed", finished=time.time(), error=e.to_json(), pid=None)

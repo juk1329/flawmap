@@ -24,16 +24,35 @@ import numpy as np
 
 from ..anchor.parametric import CHARTS, DeviceModel
 from ..surface.maps import ChartMaps
+from ..utils.image import imwrite
 
 ATLAS_W, ATLAS_H = 4096, 2048
-ATLAS = {"screen": (0, 0, 0.1), "back": (760, 0, 0.1), "frame": (0, 1520, 0.12)}   # x0, y0, mm per px
+ATLAS = {"screen": (0, 0, 0.1), "back": (760, 0, 0.1), "frame": (0, 1520, 0.12)}   # x0, y0, mm per px (phones)
+
+
+def atlas_layout(model: DeviceModel) -> dict[str, tuple[int, int, float]]:
+    """Where each chart sits in the 4096 x 2048 atlas: (x0, y0, mm per pixel). Screen and back side
+    by side on top, the frame band below. Phones get the fixed layout above (0.1 / 0.12 mm per px);
+    a larger device gets coarser pixels so it still fits (a 13-inch tablet: 0.15 mm on the faces;
+    the fixed layout overflowed the atlas, 2026-11-17)."""
+    fw, fh = model.chart_size("screen")
+    bw, bh = model.chart_size("frame")
+    r_band = max(0.12, bw / (ATLAS_W - 8))
+    band_px = int(np.ceil(bh / r_band))
+    r_face = max(0.1, 2 * fw / (ATLAS_W - 45), fh / (ATLAS_H - 53 - band_px - 8))
+    r_face = float(np.ceil(r_face / 0.01 - 1e-9) * 0.01)
+    if r_face <= 0.1 + 1e-9 and r_band <= 0.12 + 1e-9:
+        return dict(ATLAS)
+    w_px, h_px = int(np.ceil(fw / r_face)), int(np.ceil(fh / r_face))
+    return {"screen": (0, 0, r_face), "back": (w_px + 45, 0, r_face), "frame": (0, h_px + 53, float(r_band))}
 UNSEEN_RGB = (150, 150, 150)
 
 
 def atlas_uv(model: DeviceModel) -> np.ndarray:
     uv = np.zeros((len(model.vuv), 2))
+    lay = atlas_layout(model)
     for ci, c in enumerate(CHARTS):
-        x0, y0, res = ATLAS[c]
+        x0, y0, res = lay[c]
         sel = model.vchart == ci
         uv[sel, 0] = (x0 + model.vuv[sel, 0] / res) / ATLAS_W
         uv[sel, 1] = (y0 + model.vuv[sel, 1] / res) / ATLAS_H
@@ -42,7 +61,7 @@ def atlas_uv(model: DeviceModel) -> np.ndarray:
 
 def _chart_to_atlas(cm: ChartMaps | None, chart: str, model: DeviceModel, values: np.ndarray | None,
                     fill: np.ndarray, interp=cv2.INTER_AREA) -> tuple[np.ndarray, tuple[int, int, int, int]]:
-    x0, y0, res = ATLAS[chart]
+    x0, y0, res = atlas_layout(model)[chart]
     w_mm, h_mm = model.chart_size(chart)
     W, H = int(np.ceil(w_mm / res)), int(np.ceil(h_mm / res))
     if cm is None or values is None:
@@ -85,7 +104,7 @@ def build_atlas(maps: dict[str, ChartMaps], model: DeviceModel, defects: list[di
     for d in defects:
         c = d["chart"]
         cm = maps[c]
-        x0, y0, res = ATLAS[c]
+        x0, y0, res = atlas_layout(model)[c]
         uv = cm.geom.uv_of(region_texels[d["id"]])
         px = np.stack([x0 + uv[:, 0] / res, y0 + uv[:, 1] / res], 1)
         m = np.zeros((ATLAS_H, ATLAS_W), np.uint8)
@@ -128,10 +147,10 @@ def transcode_for_browser(src: Path, dst: Path, height: int = 720) -> None:
 
 def save_png(img: np.ndarray, path: Path) -> None:
     if img.shape[-1] == 4:
-        cv2.imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGBA2BGRA))
+        imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGBA2BGRA))
     else:
-        cv2.imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
 
 
 def save_jpg(img: np.ndarray, path: Path, q: int = 90) -> None:
-    cv2.imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, q])
+    imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, q])
