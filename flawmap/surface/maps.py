@@ -26,6 +26,23 @@ from ..geometry.transforms import inv_T
 from .raycast import RaycastScene
 
 DEFAULT_RES = {"screen": 0.1, "back": 0.1, "frame": 0.05}
+MAX_FACE_TEXELS = 3.0e6     # per face; per-view samples cost ~5 bytes per texel and view
+MAX_BAND_TEXELS = 1.5e6     # the frame band at 0.05 mm: an iPhone 12 ~1.3 M, a 13-inch tablet ~2.4 M (stopped
+                            # by the memory guard on a 32 GB PC with two passes of 141 views, 2026-11-17)
+
+
+def chart_res(model: DeviceModel, chart: str) -> float:
+    """Texel size for ``chart``: the default, coarsened in 0.05 mm steps for large faces (a 13-inch
+    tablet face at 0.1 mm is 6 M texels, over 4 GB of samples for 140 views). Phones keep 0.1 mm;
+    the capture itself resolves ~0.27 mm per pixel at 40 cm."""
+    res = DEFAULT_RES[chart]
+    w, h = model.chart_size(chart)
+    cap = MAX_FACE_TEXELS if chart in ("screen", "back") else MAX_BAND_TEXELS
+    need = float(np.sqrt(w * h / cap))
+    if need > res:
+        step = 0.05 if chart in ("screen", "back") else 0.01
+        res = float(np.ceil(need / step) * step)
+    return res
 
 
 @dataclass
@@ -52,7 +69,7 @@ class ChartGeometry:
 
 
 def chart_geometry(model: DeviceModel, chart: str, res: float | None = None) -> ChartGeometry:
-    res = res or DEFAULT_RES[chart]
+    res = res or chart_res(model, chart)
     w, h = model.chart_size(chart)
     cols, rows = int(np.ceil(w / res)), int(np.ceil(h / res))
     cu = (np.arange(cols) + 0.5) * res
@@ -125,7 +142,11 @@ def _bilinear_rgb(img: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
 
 def collect_samples(model: DeviceModel, geoms: dict[str, ChartGeometry], frames: dict[int, np.ndarray],
                     cams: dict[int, Camera], T_world_cam: dict[int, np.ndarray], T_world_cad: np.ndarray,
-                    min_cos: float = 0.15, depth_scale: float = 0.25) -> dict[str, ChartMaps]:
+                    min_cos: float = 0.15, depth_scale: float = 0.25, masks: dict[int, np.ndarray] | None = None,
+                    mask_grow_px: int = 4) -> dict[str, ChartMaps]:
+    """Per-view colour samples of each chart. ``masks`` (bool device masks per frame, e.g. SAM 2)
+    leave out samples that project outside the device in that frame (grown by ``mask_grow_px`` for
+    the mask's coarse edge), so a slightly misregistered frame cannot bring floor into the texture."""
     scene = RaycastScene(model.mesh, T_world_cad)
     order = sorted(frames)
     V = len(order)
@@ -140,6 +161,12 @@ def collect_samples(model: DeviceModel, geoms: dict[str, ChartGeometry], frames:
         dmap = np.where(hq.hit, hq.depth, np.inf).astype(np.float32)
         Tcw = inv_T(Twc)
         img = frames[i]
+        mk = None
+        if masks is not None and i in masks:
+            mk = masks[i]
+            g = int(np.ceil(mask_grow_px * mk.shape[1] / cam.width))       # grow in full-frame pixels
+            if g > 0:
+                mk = cv2.dilate(mk.astype(np.uint8), np.ones((2 * g + 1,) * 2, np.uint8)) > 0
         for c, g in geoms.items():
             pc = Pw[c] @ Tcw[:3, :3].T + Tcw[:3, 3]
             z = pc[:, 2]
@@ -158,6 +185,10 @@ def collect_samples(model: DeviceModel, geoms: dict[str, ChartGeometry], frames:
             # neighbourhood minimum guards the quantised depth at silhouettes
             vis = z[ok] <= dref + 0.6 + 0.004 * z[ok]
             idx = np.flatnonzero(ok)[vis]
+            if mk is not None:
+                mu = np.clip(np.floor((u[idx] + 0.5) * mk.shape[1] / cam.width).astype(int), 0, mk.shape[1] - 1)
+                mv = np.clip(np.floor((v[idx] + 0.5) * mk.shape[0] / cam.height).astype(int), 0, mk.shape[0] - 1)
+                idx = idx[mk[mv, mu]]
             rgb, cs = buf[c]
             rgb[vi, idx] = np.clip(_bilinear_rgb(img, u[idx], v[idx]), 0, 255).astype(np.uint8)
             cs[vi, idx] = cosv[idx].astype(np.float16)
@@ -165,6 +196,54 @@ def collect_samples(model: DeviceModel, geoms: dict[str, ChartGeometry], frames:
         rgb, cs = buf[c]
         out[c] = ChartMaps(g, ViewSamples(order, rgb, cs))
     return out
+
+
+def prefer_sharp_views(cm: ChartMaps, keep_share: float = 0.3, min_views: int = 3, min_cos: float = 0.3) -> dict:
+    """Keep only the sharpest views of a chart where enough of them saw a texel.
+
+    A hand-held orbit is mostly motion-blurred: on the first real iPad capture the views' detail
+    varied five-fold, and the median over all of them washed out the logo's edge (gradient energy
+    17, sharpest single view 509; median of the sharpest 20 % of views 122, 173 with COLMAP poses).
+    Each view's detail is measured on the chart itself (rectified samples), as the gradient energy
+    over the texels it saw divided by that of the mean image over the same texels, so what the view
+    happens to cover does not count. Views in the top ``keep_share`` are kept; at texels that fewer
+    than ``min_views`` kept views saw, every view stays. Works in place on ``cm.samples.cos`` (0 =
+    not used), so statistics, detectors and coverage all follow it. Returns a summary."""
+    s = cm.samples
+    g = cm.geom
+    V, N = s.cos.shape
+    if V < 2 * min_views:
+        return {"views": V, "kept": V, "applied": False}
+    grey = s.rgb.mean(-1, dtype=np.float32)                       # (V, N)
+    vis = s.cos.astype(np.float32) >= min_cos
+    cnt = vis.sum(0)
+    mean = np.where(cnt > 0, (grey * vis).sum(0) / np.maximum(cnt, 1), 0).astype(np.float32)
+    mean_img = g.to_image(mean)
+    k = np.ones((5, 5), np.uint8)
+
+    def energy(img, m):
+        gx, gy = cv2.Sobel(img, cv2.CV_32F, 1, 0), cv2.Sobel(img, cv2.CV_32F, 0, 1)
+        e = gx * gx + gy * gy
+        return float(e[m].mean()) if m.any() else np.nan
+
+    ratio = np.full(V, np.nan)
+    for v in range(V):
+        m = cv2.erode(g.to_image(vis[v].astype(np.uint8)), k) > 0     # away from the view's own border
+        if m.sum() < 500:
+            continue
+        ratio[v] = energy(g.to_image(grey[v]), m) / max(energy(mean_img, m), 1e-6)
+    ok = np.isfinite(ratio)
+    if ok.sum() < 2 * min_views:
+        return {"views": V, "kept": V, "applied": False}
+    cut = np.quantile(ratio[ok], 1.0 - keep_share)
+    keep = ok & (ratio >= cut)
+    sharp_cnt = (vis & keep[:, None]).sum(0)
+    use_sharp = sharp_cnt >= min_views
+    drop = (~keep)[:, None] & use_sharp[None, :]
+    s.cos[drop] = 0
+    return {"views": V, "kept": int(keep.sum()), "applied": True, "ratio_cut": round(float(cut), 3),
+            "ratio_p50": round(float(np.median(ratio[ok])), 3), "ratio_max": round(float(np.max(ratio[ok])), 3),
+            "texels_sharp_only": round(float(use_sharp[cnt > 0].mean()), 3) if (cnt > 0).any() else 0.0}
 
 
 def lab_of(rgb_u8: np.ndarray) -> np.ndarray:

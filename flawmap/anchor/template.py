@@ -46,10 +46,14 @@ def template_spec(length: float, width: float, thickness: float, corner_radius: 
 
 def fit_dimensions(spec: DeviceSpec, frames: dict[int, np.ndarray], cams: dict, T_world_cam: dict[int, np.ndarray],
                    T_world_cad: np.ndarray, views: list[int], searches=(10.0, 6.0, 4.0, 3.0, 2.5), fit_thickness: bool = True,
-                   max_points_per_view: int = 500, huber_px: float = 1.0, radii=(6.0, 8.0, 10.0, 12.0), log=print):
-    """Pose and plate size from image edges with cameras fixed. Returns (spec, T_world_cad, info)."""
+                   max_points_per_view: int = 500, huber_px: float = 1.0, radii=None, log=print):
+    """Pose and plate size from image edges with cameras fixed. Returns (spec, T_world_cad, info).
+    ``radii``: corner radii tried at the end; default 6-12 mm for phone-sized plates, and 0.6-1.5x
+    the starting radius for larger ones (a 13-inch tablet's corner is ~14 mm)."""
     L, W, T = spec.length, spec.width, spec.thickness
     r = spec.raw.get("corner_radius", GENERIC_PHONE["corner_radius"])
+    if radii is None:
+        radii = (6.0, 8.0, 10.0, 12.0) if r <= 12.0 else tuple(round(r * k, 1) for k in (0.6, 0.8, 1.0, 1.25, 1.5))
     grads = {i: _grad(frames[i]) for i in views}
     rng = np.random.default_rng(0)
     rounds = []

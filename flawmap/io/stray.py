@@ -1,8 +1,8 @@
 """Read a Stray Scanner recording (https://github.com/strayrobots/scanner/blob/main/docs/format.md).
 
-``odometry.csv`` holds, per frame, the ARKit camera pose (camera-to-world, metres; ARKit camera
-axes x right, y up, z backwards) and the per-frame intrinsics of ``rgb.mp4``. Poses are converted to
-the OpenCV camera convention and millimetres here. The ARKit world frame is gravity-aligned (+Y up)
+``odometry.csv`` holds, per frame, the camera pose (camera-to-world, metres) in the ARKit world and
+the per-frame intrinsics of ``rgb.mp4``. Stray Scanner already writes the camera axes in the OpenCV
+convention (x right, y down, z forward; see ``ARKIT_TO_CV_CAM``), so poses only become millimetres here. The ARKit world frame is gravity-aligned (+Y up)
 but its origin and heading are wherever the session started; ``poses.align`` maps it onto the board.
 
 ``rgb.mp4`` is decoded with the ffmpeg bundled in imageio-ffmpeg (HEVC capable) **without
@@ -22,7 +22,11 @@ import numpy as np
 from ..geometry.camera import Camera
 from ..geometry.transforms import make_T
 
-ARKIT_TO_CV_CAM = np.diag([1.0, -1.0, -1.0, 1.0])
+# Stray Scanner's odometry.csv already stores world <- camera in the OpenCV convention (x right,
+# y down, z forward), not ARKit's camera axes (y up, z back). Checked on two real iPhone recordings
+# (2026-11-17): with this identity the per-frame LiDAR floor normals agree within 1.3 deg and point
+# along ARKit's up axis; with the former diag(1, -1, -1) they scattered by 27 deg.
+ARKIT_TO_CV_CAM = np.eye(4)
 
 
 @dataclass

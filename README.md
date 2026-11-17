@@ -134,7 +134,12 @@ flawmap serve --port 8000                                # http://localhost:8000
 flawmap run --device auto --pass back=...                # 기종을 모를 때: 잰 크기로 추정, 맞는 도면이 없으면 판 모양 모델
 flawmap run --device iphone-12 --poses boardless ...     # 보드가 찍혀 있어도 보드 없이 위치를 잼 (비교용)
 flawmap uco3d 59015-27660-21826 --face-up screen         # 공개 uCO3D 영상을 도면 없이 처리
+flawmap run --device auto --poses boardless --quality max --pass back=... --pass screen=...   # SAM 2 기기 마스크 + COLMAP 자세 보정 + 선명한 장면 우선 (느림)
+flawmap batch data/captures                              # 촬영 규격 v2 폴더(manifest.yaml) 일괄 처리, 요약 runs/batch/summary.md
+flawmap board --board configs/board_a2.yaml --size 281.6 215.5 14   # 태블릿용 A2 매트 (도면 없으면 크기로 안내선)
 ```
+
+일괄 처리용 촬영 규격(매트, 녹화 종류, `manifest.yaml` 형식)은 `docs/project_guide.md` 7.0절, 품질 기준은 `configs/batch.yaml`에 있습니다.
 
 실제 촬영본 없이 시험하려면 가상 촬영본을 만듭니다. Stray Scanner와 같은 형식에 정답(`gt.json`)이 함께 생깁니다.
 
@@ -180,7 +185,7 @@ data/, runs/  생성물과 내려받은 데이터 (git 제외)
 ## 8. 테스트
 
 ```bash
-pytest          # 단위 테스트 40개, 약 1분 (작은 가상 촬영본을 끝까지 돌리는 시험, 서비스 흐름 시험 포함)
+pytest          # 단위 테스트 52개, 약 1분 (작은 가상 촬영본을 끝까지 돌리는 시험, 서비스 흐름 시험 포함)
 ```
 
 ## 9. 라이선스

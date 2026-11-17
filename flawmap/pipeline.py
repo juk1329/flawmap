@@ -35,7 +35,7 @@ from .geometry.transforms import inv_T
 from .io.stray import choose_undistortion, distortion_lut, iter_frames, read_stray, undistort_maps
 from .poses.align import estimate_poses
 from .poses.board import BoardSpec
-from .surface.maps import ChartMaps, ViewSamples, chart_geometry, collect_samples, compute_stats, coverage
+from .surface.maps import ChartMaps, ViewSamples, chart_geometry, collect_samples, compute_stats, coverage, prefer_sharp_views
 from .utils.io import write_json
 from .utils.logging import add_file_handler, get_logger
 
@@ -209,8 +209,11 @@ class _Stages:
 
 
 def prepare_stray_pass(p: PassInput, p_i: int, model, board: BoardSpec, keyframes: int = 140, reg_views: int = 36,
-                       poses_mode: str = "auto", stages: _Stages | None = None, max_reg_px: float = 1.5) -> PreparedPass:
-    """A Stray Scanner pass: keyframes, camera poses (board, ARKit), model registration."""
+                       poses_mode: str = "auto", stages: _Stages | None = None, max_reg_px: float = 1.5,
+                       plate=None, refine: str | None = None, segment: bool = False) -> PreparedPass:
+    """A Stray Scanner pass: keyframes, camera poses (board, ARKit), model registration.
+    ``segment``: SAM 2 device masks (``segment.device_masks``) to judge the registration, choose
+    between pose alternatives, and keep floor pixels out of the colour samples."""
     stages = stages or _Stages(1, None)
     t0 = time.time()
     stages.at("decode", p_i)
@@ -249,14 +252,77 @@ def prepare_stray_pass(p: PassInput, p_i: int, model, board: BoardSpec, keyframe
         log.info(f"[{p.name}] keyframes {len(frames)}; board in {len(board_ids)}: camera poses from ARKit and the model outline")
         if cap.T_ark_cam is None or len(cap.T_ark_cam) < len(cap):
             raise FlawmapError("NO_POSE", f"[{p.name}] no ARKit trajectory and no board")
-        bl = boardless_poses(cap, frames, cams, model, p.face_up, log=lambda m: log.info(f"[{p.name}]{m}"))
+        bl = boardless_poses(cap, frames, cams, model, p.face_up, plate=plate, log=lambda m: log.info(f"[{p.name}]{m}"))
         poses, T_init, pose_ids, searches, pose_mode = bl.poses, bl.T_world_cad, bl.poses.frames, (3.0, 2.5), "boardless"
+    colmap_info = None
     stages.at("register", p_i)
     reg_ids = _spread(pose_ids, reg_views)
-    reg = register_device(model, {i: frames[i] for i in reg_ids}, cams, poses.T_world_cam, T_init,
-                          searches=searches, log=lambda m: log.info(f"[{p.name}]{m}"))
+
+    def _register(T_wc, srch):
+        r = register_device(model, {i: frames[i] for i in reg_ids}, cams, T_wc, T_init, searches=srch,
+                            log=lambda m: log.info(f"[{p.name}]{m}"))
+        pv_ = list(r.per_view.values())
+        return r, (float(np.median([v["median_px"] for v in pv_])) if pv_ else float("inf"))
+
+    reg, med_px = _register(poses.T_world_cam, searches)
+    masks, mask_iou = None, None
+
+    def _iou(T_wc, r):
+        return iou_report(model, masks, cams, {i: inv_T(r.T_world_cad) @ T_wc[i] for i in masks if i in T_wc})
+
+    if segment:
+        from .segment.device_masks import available, box_of, device_masks, iou_report, silhouette
+
+        if available():
+            # prompts from the first registration (board, or boardless started from the floor-mosaic
+            # plate), on six keyframes; SAM 2 then follows the device on its own through the rest
+            from .surface.raycast import RaycastScene
+
+            sc = RaycastScene(model.mesh, None)
+            pids = [pose_ids[int(k)] for k in np.linspace(0, len(pose_ids) - 1, min(6, len(pose_ids))).round()]
+            boxes = {}
+            for i in pids:
+                b = box_of(silhouette(sc, cams[i], inv_T(reg.T_world_cad) @ poses.T_world_cam[i], 0.25))
+                boxes[i] = None if b is None else b / 0.25
+            masks = device_masks({i: frames[i] for i in poses.frames}, boxes, log=lambda m: log.info(f"[{p.name}]{m}"))
+            mask_iou = _iou(poses.T_world_cam, reg)
+            log.info(f"[{p.name}]  mask IoU {mask_iou['iou_p50']} (p10 {mask_iou['iou_p10']}) with {pose_mode} poses")
+        else:
+            log.info(f"[{p.name}]  segment requested but SAM 2 / torch / the checkpoint is not available")
+    if refine == "colmap" and pose_mode == "boardless":
+        # every keyframe on its own by bundle adjustment on the floor's texture (poses/colmap.py). The
+        # similarity onto this world leaves a few mm of common offset (camera centres p50 2.5-6.8 mm
+        # on the iPad), so the device is registered again from wide search windows; the COLMAP poses
+        # are kept only when the outline fits at least about as well as with the boardless poses
+        # (on the iPad screen pass the old 8 px windows left the device 1 cm off, 2026-11-17).
+        from .poses.colmap import refine_with_colmap
+
+        new_T, colmap_info = refine_with_colmap(frames, cams, poses.T_world_cam, log=lambda m: log.info(f"[{p.name}]{m}"))
+        if new_T is not None:
+            reg_c, med_c = _register(new_T, (24.0, 12.0, 6.0, 3.0, 2.5))
+            colmap_info.update(outline_px_boardless=round(med_px, 3), outline_px_colmap=round(med_c, 3))
+            if masks is not None:
+                # the masks decide: the outline residual alone let a 1 cm offset through (screen pass,
+                # IoU 0.880 against 0.979 for the right registration)
+                iou_c = _iou(new_T, reg_c)
+                colmap_info.update(mask_iou_boardless=mask_iou["iou_p50"], mask_iou_colmap=iou_c["iou_p50"])
+                take = iou_c["iou_p50"] >= mask_iou["iou_p50"] - 0.003 and med_c <= 1.5 * med_px
+                why = f"mask IoU {iou_c['iou_p50']} with COLMAP poses vs {mask_iou['iou_p50']} without"
+            else:
+                take = med_c <= 1.1 * med_px
+                why = f"outline {med_c:.2f} px with COLMAP poses vs {med_px:.2f} px without"
+            if take:
+                poses.T_world_cam = new_T
+                poses.source = {i: "colmap" for i in poses.frames}
+                reg, med_px, pose_mode = reg_c, med_c, "boardless+colmap"
+                if masks is not None:
+                    mask_iou = iou_c
+            else:
+                colmap_info.update(used=False, reason=why)
+                log.info(f"[{p.name}]  colmap not used: {why}")
+        else:
+            log.info(f"[{p.name}]  colmap not used: {colmap_info.get('reason')}")
     pv = list(reg.per_view.values())
-    med_px = float(np.median([v["median_px"] for v in pv])) if pv else float("inf")
     if not np.isfinite(med_px) or med_px > max_reg_px:
         raise FlawmapError("DEVICE_NOT_FOUND", f"[{p.name}] outline residual {med_px:.2f} px after registration")
     Tcad = {i: inv_T(reg.T_world_cad) @ poses.T_world_cam[i] for i in poses.frames}
@@ -267,6 +333,8 @@ def prepare_stray_pass(p: PassInput, p_i: int, model, board: BoardSpec, keyframe
     info = {_gid(p_i, i): {"pass": p.name, "frame": int(i), "time_s": float(cap.timestamps[i] - cap.timestamps[0])} for i in poses.frames}
     rep = {"name": p.name, "face_up": p.face_up, "root": str(p.root), "n_frames": len(cap), "n_keyframes": len(frames),
            "n_board_poses": len(board_ids), "pose_mode": pose_mode, "arkit_vs_board": poses.arkit_residual, "undistortion": undist,
+           "colmap": colmap_info,
+           "mask_iou": {k: v for k, v in mask_iou.items() if k != "per_frame"} if mask_iou else None,
            "registration": {"T_world_cad": reg.T_world_cad, "rounds": reg.rounds, "median_px": med_px,
                             "median_mm": float(np.median([v["median_mm"] for v in pv])) if pv else None},
            "video": {k: v for k, v in cap.info.items() if k != "ffmpeg_banner"}}
@@ -274,6 +342,7 @@ def prepare_stray_pass(p: PassInput, p_i: int, model, board: BoardSpec, keyframe
                         {_gid(p_i, i): Tcad[i] for i in poses.frames},
                         {_gid(p_i, i): quality[i]["sharpness"] for i in poses.frames}, info, p.root / "rgb.mp4", rep, s_p, r_p, pose_mode)
     prep._poses, prep._reg = poses, reg
+    prep._masks = {_gid(p_i, i): m for i, m in masks.items()} if masks else None
     rep["seconds"] = round(time.time() - t0, 1)
     return prep
 
@@ -334,7 +403,7 @@ def prepare_uco3d_pass(seq, face_up: str, p_i: int = 0, keyframes: int = 100, n_
     fit = {**fit, "start": how, "mask_iou": iou, "starts": [{"start": t[1], "mask_iou": round(t[0], 3), "size_mm": [round(t[2].length, 1),
                                                                     round(t[2].width, 1)]} for t in trials]}
     ratio = spec.length / spec.width
-    if not 1.4 <= ratio <= 2.6:          # phones and small tablets are 1.4-2.3 times longer than wide
+    if not 1.2 <= ratio <= 2.6:          # phones are 1.9-2.3 times longer than wide, 4:3 tablets ~1.3-1.45
         raise FlawmapError("DEVICE_NOT_FOUND", f"[{seq.name}] fitted plate {spec.length:.1f} x {spec.width:.1f}: "
                                                f"length/width {ratio:.2f} is not a phone outline")
     k2 = assumed_width_mm / spec.width                        # keep "width = assumed" exactly
@@ -480,52 +549,147 @@ def coverage_advice(maps: dict[str, ChartMaps], model, cov: dict, good_views: in
 
 def run(passes: list[PassInput], device: str, out: str | Path, keyframes: int = 140, reg_views: int = 36,
         detect_cfg: dict | None = None, board_square_mm: float | None = None, poses: str = "auto",
-        progress: Progress | None = None, meta: dict | None = None) -> dict:
+        progress: Progress | None = None, meta: dict | None = None, board_path: str | Path | None = None,
+        refine: str | None = None, sharp_views: bool = False, segment: bool = False) -> dict:
     """Process one device from Stray Scanner passes. ``progress(stage, fraction, note)`` is called
-    along the way; ``meta`` (inspection id, code version, input hashes) is stored with the result."""
+    along the way; ``meta`` (inspection id, code version, input hashes) is stored with the result.
+    ``board_path``: the capture board's YAML (default the A3 board; tablets lie on the A2 mat)."""
     out = Path(out)
     add_file_handler(out / "run.log")
     t_start = time.time()
-    board = BoardSpec.load(square_mm=board_square_mm)
+    board = BoardSpec.load(board_path, square_mm=board_square_mm)
     stages = _Stages(len(passes), progress)
     anchor, meta = "cad", dict(meta or {})
+    plates: list = [None] * len(passes)
     if device == "auto":
-        spec, how = estimate_device(passes[0], board, keyframes=min(keyframes, 60), poses=poses)
+        # with --poses auto a printed mat may be in view; measure_plates then leaves those passes to the
+        # board path (on a mat the floor mosaic measures the paper, not the device)
+        plates = measure_plates(passes, board if poses == "auto" else None) if poses != "board" else plates
+        spec, how = estimate_device(passes[0], board, keyframes=min(keyframes, 60), poses=poses, plate=plates[0])
         meta["device_estimate"] = how
         anchor = "cad-estimated" if spec.slug != "template" else "template"
         device = spec.slug
         model = build_device_model(spec)
     else:
         model = build_device_model(DeviceSpec.by_slug(device))
-    prepared = [prepare_stray_pass(p, p_i, model, board, keyframes, reg_views, poses, stages) for p_i, p in enumerate(passes)]
+    prepared = [prepare_stray_pass(p, p_i, model, board, keyframes, reg_views, poses, stages, plate=plates[p_i], refine=refine,
+                                   segment=segment)
+                for p_i, p in enumerate(passes)]
     for pp in prepared:
         log.info(f"[{pp.name}] done in {pp.report['seconds']:.0f}s")
-    return process(prepared, model, out, device, detect_cfg=detect_cfg, stages=stages, t_start=t_start, meta=meta, anchor=anchor)
+    meta.setdefault("quality", {"refine": refine, "sharp_views": sharp_views, "segment": segment})
+    return process(prepared, model, out, device, detect_cfg=detect_cfg, stages=stages, t_start=t_start, meta=meta, anchor=anchor,
+                   sharp_views=sharp_views)
 
 
-def estimate_device(p: PassInput, board: BoardSpec, keyframes: int = 60, poses: str = "auto", tol_mm: float = 1.0):
-    """Model unknown: pose the pass with a generic plate, fit the plate's size to the outline, and
-    take the drawing-based device whose length and width match within ``tol_mm`` (else the plate).
-    Needs metric cameras (board or ARKit). Returns (spec, record)."""
+def measure_plates(passes: list[PassInput], board: BoardSpec | None = None) -> list:
+    """Floor-mosaic plates of every pass (``measure_pass_plate``; None for a pass that shows the
+    printed ``board``, which is sized by the board path), in three rounds:
+
+    1. each pass on its own; a textured face also gives the top face's height (the thickness);
+    2. passes that could not measure it (black glass) again with that height, so their outline is
+       taken at the top face and not spread out by parallax;
+    3. the shape (length, width, corner radius) of the best fit (highest IoU) held fixed on the
+       others, which only get position and heading: on the iPad back the photographer's shadow joined
+       the device in the mask while the black screen pass fitted cleanly (2026-11-17)."""
+    plates = [measure_pass_plate(p, board=board) for p in passes]
+    tops = [pl.top_height for pl in plates if pl is not None and pl.top_height is not None]
+    hint = float(np.median(tops)) if tops else None
+    if hint is not None:
+        for k, p in enumerate(passes):
+            if plates[k] is None or plates[k].top_height is None:
+                pl = measure_pass_plate(p, top_hint=hint, board=board)
+                if pl is not None:
+                    pl.top_height = hint
+                    plates[k] = pl
+    ok = [k for k, pl in enumerate(plates) if pl is not None]
+    if not ok:
+        return plates
+    best = max(ok, key=lambda k: plates[k].iou)
+    b = plates[best]
+    out = []
+    for k, p in enumerate(passes):
+        if k == best:
+            out.append(b)
+            continue
+        pl = measure_pass_plate(p, size=(b.length, b.width, b.corner_radius), top_hint=hint, board=board)
+        if pl is not None and pl.top_height is None:
+            pl.top_height = hint
+        out.append(pl)
+    log.info(f"floor plates: shape from pass {passes[best].name} ({b.length:.1f} x {b.width:.1f} mm, r {b.corner_radius:.1f}, "
+             f"IoU {b.iou:.3f}), top {hint}; fixed-shape IoU {[round(pl.iou, 3) if pl else None for pl in out]}")
+    return out
+
+
+def estimate_device(p: PassInput, board: BoardSpec, keyframes: int = 60, poses: str = "auto", tol_mm: float = 1.0,
+                    plate=None):
+    """Model unknown: pose the pass with a plate (measured on the floor mosaic when there is one, else a
+    generic phone), fit the plate's size to the outline, and take the drawing-based device whose length
+    and width match within ``tol_mm`` (else the plate). Needs metric cameras (board or ARKit).
+    Returns (spec, record)."""
     from .anchor.template import GENERIC_PHONE, fit_dimensions, identify, template_spec
 
-    spec0 = template_spec(**GENERIC_PHONE)
-    prep = prepare_stray_pass(p, 0, build_device_model(spec0), board, keyframes, 24, poses, None, max_reg_px=3.0)
+    if plate is not None:
+        # start from the measured plate: the generic phone plate never finds a tablet
+        thick = plate.top_height if plate.top_height and 2.0 < plate.top_height < 15.0 else GENERIC_PHONE["thickness"]
+        spec0 = template_spec(plate.length, plate.width, thick, plate.corner_radius)
+    else:
+        spec0 = template_spec(**GENERIC_PHONE)
+    prep = prepare_stray_pass(p, 0, build_device_model(spec0), board, keyframes, 24, poses, None, max_reg_px=3.0, plate=plate)
     ids = sorted(prep.frames)
     spec, _, fit = fit_dimensions(spec0, prep.frames, prep.cams, prep.T_cad_cam, np.eye(4), _spread(ids, 24),
                                   log=lambda m: log.info(f"[{p.name}] (size){m}"))
     L, W, T = fit["size_mm"]
     hit = identify(L, W, tol_mm)
     rec = {"size_mm": [round(L, 2), round(W, 2), round(T, 2)], "corner_radius": fit["corner_radius"],
+           "floor_plate": plate.info if plate is not None else None,
            "matched": hit.slug if hit else None, "matched_name": hit.name if hit else None, "tolerance_mm": tol_mm}
     log.info(f"[{p.name}] fitted plate {L:.2f} x {W:.2f} x {T:.2f} mm -> {hit.name if hit else 'no drawing within ' + str(tol_mm) + ' mm'}")
     return (hit if hit else spec), rec
 
 
+def measure_pass_plate(p: PassInput, n_views: int = 60, size: tuple | None = None, top_hint: float | None = None,
+                       board: BoardSpec | None = None, board_views: int = 8, board_min_views: int = 3):
+    """The device's size and pose on the floor from a Stray pass with ARKit and LiDAR, before any
+    model exists (``anchor.floor_outline``); None without depth or when nothing device-like is found.
+    ``board``: also None when the printed board's markers show in ``board_min_views`` of
+    ``board_views`` frames. The mosaic would measure the paper: on the synthetic A3 capture
+    ``iphone12_dent_small`` it gave 417.4 x 290.9 mm (the page is 420 x 297) and ``--device auto``
+    ended with a paper-sized plate model instead of the iPhone 12 the board path finds (2026-11-17)."""
+    from .anchor.floor_outline import measure_plate
+    from .poses.boardless import T_W_ARK, axes_meeting_point, floor_height
+
+    cap = read_stray(p.root)
+    if not cap.has_depth or cap.T_ark_cam is None:
+        return None
+    n = len(cap)
+    ids = sorted({int(k) for k in np.linspace(0, n - 6, n_views).round()})
+    frames = dict(iter_frames(p.root / "rgb.mp4", ids, scale=0.5))
+    ids = [i for i in ids if i in frames]
+    if board is not None and ids:
+        from .poses.board import BoardDetector
+
+        det = BoardDetector(board)
+        probe = [ids[int(k)] for k in np.linspace(0, len(ids) - 1, min(board_views, len(ids))).round()]
+        seen = sum(det.detect_markers(cv2.cvtColor(frames[i], cv2.COLOR_RGB2GRAY))[2] >= 4 for i in probe)
+        if seen >= board_min_views:
+            log.info(f"[{p.name}]  floor plate: skipped, the board is in view ({seen}/{len(probe)} frames)")
+            return None
+    cams = {i: cap.camera(i).scaled(0.5) for i in ids}
+    Tw = {i: T_W_ARK @ cap.T_ark_cam[i] for i in ids}
+    centre = axes_meeting_point([Tw[i] for i in ids])
+    early = ids[: max(8, len(ids) * 3 // 10)]
+    zf = floor_height(cap, early, Tw, centre)
+    if zf is None:
+        return None
+    return measure_plate(frames, cams, Tw, zf, centre[:2], scale=1.0, size=size, top_hint=top_hint, log=lambda m: log.info(f"[{p.name}]{m}"))
+
+
 def process(prepared: list[PreparedPass], model, out: Path, device: str, detect_cfg: dict | None = None,
             stages: _Stages | None = None, t_start: float | None = None, meta: dict | None = None,
-            anchor: str = "cad") -> dict:
-    """The steps shared by every input: colour samples, coverage, detection, evidence, bundle."""
+            anchor: str = "cad", sharp_views: bool = False) -> dict:
+    """The steps shared by every input: colour samples, coverage, detection, evidence, bundle.
+    ``sharp_views``: statistics and detection from each chart's sharpest views (``prefer_sharp_views``)."""
     out = Path(out)
     (out / "bundle" / "evidence").mkdir(parents=True, exist_ok=True)
     (out / "bundle" / "spin").mkdir(parents=True, exist_ok=True)
@@ -535,7 +699,12 @@ def process(prepared: list[PreparedPass], model, out: Path, device: str, detect_
     pass_maps, frames_all, cams_all, Tcad_all, sharp_all, info_all = [], {}, {}, {}, {}, {}
     for p_i, pp in enumerate(prepared):
         stages.at("samples", p_i)
-        pm = collect_samples(model, {c: geoms[c] for c in pp.charts}, pp.frames, pp.cams, pp.T_cad_cam, np.eye(4))
+        pm = collect_samples(model, {c: geoms[c] for c in pp.charts}, pp.frames, pp.cams, pp.T_cad_cam, np.eye(4),
+                             masks=getattr(pp, "_masks", None))
+        if sharp_views:
+            sel = {c: prefer_sharp_views(cm) for c, cm in pm.items()}
+            pp.report["sharp_views"] = sel
+            log.info(f"[{pp.name}] sharp views: " + ", ".join(f"{c} {v['kept']}/{v['views']}" for c, v in sel.items()))
         pass_maps.append(pm)
         frames_all.update(pp.frames)
         cams_all.update(pp.cams)

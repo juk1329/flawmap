@@ -2,9 +2,10 @@
 
 Until the team's real captures arrive, the whole pipeline is developed and tested on renders of
 the reference model lying on the printed board, written exactly like a Stray Scanner recording
-(``rgb.mp4``, ``odometry.csv`` with ARKit-convention poses in metres and per-frame intrinsics,
-``camera_matrix.csv``, 256x192 ``depth/`` in mm, ``confidence/``) plus ``gt.json`` with the true
-board-frame camera poses, the true device placement and the injected defects. The ARKit poses get
+(``rgb.mp4``, ``odometry.csv`` with ARKit-world poses in metres and OpenCV camera axes, as Stray
+Scanner writes them, and per-frame intrinsics, ``camera_matrix.csv``, 256x192 ``depth/`` in mm,
+``confidence/``) plus ``gt.json`` with the true board-frame camera poses, the true device placement
+and the injected defects. The ARKit poses get
 a slow drift, as real ARKit does over a full circle, so the board-based poses have to be used.
 
 The shading is deliberately simple but keeps the two things that matter for the detectors:
@@ -337,7 +338,7 @@ def render_frame(model: DeviceModel, scene: RaycastScene, tex: dict, colors: dic
 
 # ----------------------------------------------------------------------------- ARKit convention
 T_ARK_WORLD_BASE = make_T(np.array([[1.0, 0, 0], [0, 0, 1.0], [0, -1.0, 0]]))   # board z-up -> ARKit y-up
-CV_TO_ARKIT_CAM = np.diag([1.0, -1.0, -1.0, 1.0])
+CV_TO_ARKIT_CAM = np.eye(4)   # Stray writes OpenCV camera axes (see flawmap.io.stray.ARKIT_TO_CV_CAM)
 
 
 def write_stray(out: Path, cam: Camera, frames: list[np.ndarray], depths: list[np.ndarray], T_ark_cam: list[np.ndarray],

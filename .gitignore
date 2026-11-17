@@ -12,8 +12,8 @@ docs/*
 !docs/project_guide.md
 # generated / downloaded data and run outputs (datasets, Apple drawings and derived CAD
 # must not be redistributed)
-data/
-runs/
+/data/
+/runs/
 *.db
 # vendored browser libraries are fetched by scripts/fetch_web_vendor.sh
 web/vendor/*

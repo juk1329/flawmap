@@ -199,7 +199,9 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true 
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(26, 1, 0.005, 5);
+// the default views frame a phone (~147 mm long) from 0.36 m; larger devices are framed from farther
+const viewScale = Math.max(1, (data.device.length_mm || 146.7) / 146.7);
+const camera = new THREE.PerspectiveCamera(26, 1, 0.005, 5 * viewScale);
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = !reduceMotion;
 controls.dampingFactor = 0.12;
@@ -278,7 +280,7 @@ canvas.addEventListener('pointerup', (e) => {
 function setView(face, animate = true) {
   const dirs = { screen: [0.0, -0.18, 1], back: [0.0, -0.18, -1], side: [1, -0.25, 0.35] };
   const dir = new THREE.Vector3(...dirs[face]).normalize();
-  tween(new THREE.Vector3(0, 0, 0), dir.multiplyScalar(0.36), animate);
+  tween(new THREE.Vector3(0, 0, 0), dir.multiplyScalar(0.36 * viewScale), animate);
 }
 $('viewFront').addEventListener('click', () => setView('screen'));
 $('viewBack').addEventListener('click', () => setView('back'));

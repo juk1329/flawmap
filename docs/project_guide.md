@@ -52,14 +52,14 @@
 | 파이썬 환경 | ISCO에서 쓰던 conda 환경 `env_isaaclab`만 사용. 새 가상환경 금지 |
 | git | GitHub `juk1329/flawmap`의 `main` 브랜치. 단계마다 커밋하고 올림 |
 
-### 1.4 현재 상태 (2026-11-16)
+### 1.4 현재 상태 (2026-11-17)
 
 | 부분 | 상태 | 확인한 방법 |
 |---|---|---|
 | 도면 기반 원본 모델 (iPhone 11, 12) | 있음 | 치수가 도면과 0.02 mm 안, 화면이 위일 때 기울기 0.72–0.75° |
 | 촬영 보드 PDF | 있음 | 페이지 420.0 × 297.0 mm, 회색 영역에 외곽선과 화살표 |
 | 카메라 위치: 보드 | 있음 | 가상: 32/32장, 0.0022°·0.089 mm |
-| 카메라 위치: 보드 없이 (ARKit + 기기 외곽) | 있음 | 가상 나무·종이 바닥: 모델 재투영 중앙값 0.21·0.11 px |
+| 카메라 위치: 보드 없이 (ARKit + 기기 외곽) | 있음 | 가상 나무·종이 바닥: 모델 재투영 중앙값 0.21·0.11 px. 실제 아이패드 두 면: 외곽 잔차 0.77·0.79 px |
 | 원본 모델 정합 (외곽 기반) | 있음 | 가상: 0.035°·0.113 mm, 잔차 0.245 px |
 | 펼친 외관 지도, 커버리지 | 있음 | 가상: 한 면만 찍으면 55.8%, 두 면 100% |
 | 하자 검출 (까짐·찍힘·깨짐·흠집) | 있음 | 가상 하자로만. 흠집이 깨짐으로 분류되는 문제가 있음 |
@@ -67,11 +67,14 @@
 | 웹 뷰어 (3D 보기, 실제 영상 360 보기) | 있음 | 헤드리스 브라우저 스크린샷 |
 | 검수 서비스 (요청, 대기열, 공유, 공개 목록) | 있음 | 단위 시험 11개, 업로드·가상 샘플·공개 영상으로 끝까지 |
 | 판 모양 모델 (도면 없음), 크기로 기종 추정 | 실험 | 가상: 크기 0.2 mm 안. uCO3D 휴대폰 8개 정성 확인 |
+| 바닥 모자이크로 판 재기 (태블릿) | 실험 | 실제 아이패드 프로 13": 281.3 × 215.7 × 6.0 mm (애플 281.6 × 215.5 × 5.1). 매트 위에서는 건너뜀 |
+| `--quality max` (SAM 2 마스크, COLMAP, 선명한 장면) | 실험 | 6.13절 |
+| 일괄 처리 `flawmap batch` (촬영 규격 v2) | 있음 | 단위 시험만. 규격 v2 촬영 폴더로는 아직 돌리지 않음 |
 | 공개 영상(uCO3D) 처리 | 실험 | 깨진 것과 깨끗한 것의 구분이 아직 약함 (4.4절) |
-| **실제 팀 촬영본** | **없음** | 팀 촬영을 기다리는 중 (9.3절) |
-| 아이패드, 3DGS, 검출기 학습, 일반 영상(ARKit 없음) 입력 | 확장 목표 | |
+| **실제 팀 촬영본** | **첫 촬영 1건** | 아이패드 프로 13" 두 면, 나무 바닥, 매트 없음, 17·21초 (`data/real/`). 하자 정답 없음. 아이폰 촬영은 기다리는 중 (9.3절) |
+| 아이패드 도면 모델, 3DGS, 검출기 학습, 일반 영상(ARKit 없음) 입력 | 확장 목표 | |
 
-단위 시험 40개가 통과합니다(약 1분).
+단위 시험 52개가 통과합니다(약 1분).
 
 ### 1.5 일정
 
@@ -112,7 +115,17 @@ export PYTHONPATH=
 bash scripts/install_extra_deps.sh --dry-run   # 기존 패키지가 바뀌지 않는지 먼저 확인
 bash scripts/install_extra_deps.sh             # scikit-image, plyfile, gdown, remotezip
 pip install -e . --no-deps --no-build-isolation   # flawmap 명령
-pytest                                          # 단위 시험 40개, 약 1분
+pytest                                          # 단위 시험 52개, 약 1분
+```
+
+`--quality max`(6.13절)의 기기 마스크에는 SAM 2가 필요합니다. 메타 공식 저장소의 고정 커밋을 CUDA 확장 없이 넣고, 공개 체크포인트(184 MB, 로그인 없음)를 받습니다. PyPI의 `sam2` 패키지는 메타가 아닌 개인 포크에서 올린 것이라 쓰지 않습니다. 팀 서버에는 11-17에 넣었습니다(새로 들어간 것은 `SAM-2 1.0`, `iopath 0.1.10`뿐).
+
+```bash
+SAM2=git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4
+SAM2_BUILD_CUDA=0 pip install --dry-run --no-build-isolation -c scripts/constraints-isaacsim.txt "$SAM2"
+SAM2_BUILD_CUDA=0 pip install --no-build-isolation -c scripts/constraints-isaacsim.txt "$SAM2"
+mkdir -p data/models && curl -L -o data/models/sam2.1_hiera_small.pt \
+  https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
 ```
 
 - `scripts/constraints-isaacsim.txt`는 numpy 1.26.0, psutil 5.9.8, torch 2.7.0+cu128을 고정합니다. 새 패키지는 반드시 `pip install --dry-run -c scripts/constraints-isaacsim.txt`로 기존 패키지가 바뀌지 않는지 먼저 봅니다.
@@ -170,11 +183,18 @@ flawmap check <Stray 폴더> --device iphone-12 --face-up back        # 첫 촬�
 flawmap run --device iphone-12 --pass back=<폴더> [--pass screen=<폴더>] --out runs/<이름>
 flawmap run --device auto ...                                      # 기종 모름: 크기로 추정, 맞는 도면이 없으면 판 모양 모델
 flawmap run ... --poses boardless                                  # 보드가 찍혀 있어도 보드 없이 (비교용)
+flawmap run ... --quality max                                      # SAM 2 기기 마스크, COLMAP 자세 보정, 선명한 장면 우선 (6.13절, 느림)
+flawmap run ... --board configs/board_a2.yaml                      # 태블릿용 A2 매트
+flawmap batch data/captures [--force]                              # 촬영 규격 v2 폴더 일괄 처리 (6.12절, 7.0절)
+flawmap board --board configs/board_a2.yaml --size 281.6 215.5 14  # 도면 없는 기기: 길이·폭·모서리 반경으로 안내선
 flawmap uco3d <시퀀스> --face-up screen --out runs/uco3d_<시퀀스>    # 공개 uCO3D 영상, 도면 없이
 flawmap serve --port 8000                                          # 서비스와 뷰어
 python -m flawmap.synth.render_capture data/synthetic/<이름> [--preset demo|small|small-v1|dents] [--background board|wood|paper|cloth] --seed N
 python -m flawmap.synth.evaluate runs/<이름> --pass back=data/synthetic/<촬영본>   # 정답과 비교
 python -m flawmap.io.download uco3d|omniobject3d|mobilebrick [--sequences ...]   # 공개 데이터
+python -m flawmap.texture.allframes runs/<이름> --pass back=<폴더>          # 실험: 모든 프레임으로 텍셀별 해상도와 텍스처
+python -m flawmap.shape.visual_hull runs/<이름> --pass back=<폴더>          # 실험: 실루엣만으로 형상 (SAM 2 필요)
+python scripts/glb_to_usdz.py runs/<이름>/bundle/model.glb <출력>.usdz runs/<이름>/bundle/texture.jpg   # macOS 미리보기용 USDZ
 ```
 
 오래 걸리는 작업은 `bash scripts/with_memory_guard.sh <스크립트 파일>`로 감쌉니다(10.2절).
@@ -322,7 +342,7 @@ rows = con.execute("SELECT sequence_name, _short_caption_text FROM sequence_anno
 ### 3.7 가상 촬영본 (직접 만듦)
 
 `flawmap/synth/render_capture.py`가 원본 모델을 렌더해 Stray Scanner와 같은 형식의 촬영본을 만듭니다.
-- 형식: `rgb.mp4`, ARKit 규약 `odometry.csv`, 256×192 깊이와 신뢰도
+- 형식: `rgb.mp4`, `odometry.csv`(ARKit 세계 좌표, 카메라 축은 Stray Scanner와 같은 OpenCV 규약, 6.11절), 256×192 깊이와 신뢰도
 - 정답 `gt.json`: 보드 좌표의 카메라 위치, 기기 자세, 넣은 하자
 - ARKit 위치에는 한 바퀴에 8 mm·0.6°의 흐름을 넣습니다.
 - 렌더는 1920×1440 프레임당 약 1.7 s입니다.
@@ -553,8 +573,12 @@ rows = con.execute("SELECT sequence_name, _short_caption_text FROM sequence_anno
 
 ```
 flawmap/
-  anchor/     parametric.py (도면 모델), register.py (외곽 정합), template.py (판 모양 모델, 기종 추정)
-  poses/      board.py (보드), align.py (ARKit 맞추기), boardless.py (보드 없이)
+  anchor/     parametric.py (도면 모델), register.py (외곽 정합), template.py (판 모양 모델, 기종 추정),
+              floor_outline.py (바닥 모자이크로 판 크기·위치 재기)
+  poses/      board.py (보드), align.py (ARKit 맞추기), boardless.py (보드 없이), colmap.py (COLMAP 자세 보정)
+  segment/    device_masks.py (SAM 2 기기 마스크, 마스크와 정합 비교)
+  texture/    allframes.py (실험: 모든 프레임 텍스처)
+  shape/      visual_hull.py (실험: 실루엣 형상)
   io/         stray.py (Stray Scanner), uco3d.py (공개 uCO3D), download.py (공개 데이터)
   frames/     select.py
   surface/    raycast.py, raycast_warp.py (GPU), maps.py (펼친 지도, 커버리지)
@@ -564,11 +588,12 @@ flawmap/
   synth/      render_capture.py (가상 촬영본), evaluate.py (정답과 비교)
   service/    store.py, intake.py, worker.py, job.py
   server/     app.py
-  geometry/, utils/, pipeline.py, check.py, errors.py, cli.py
+  geometry/, utils/, pipeline.py, batch.py (일괄 처리), check.py, errors.py, cli.py
 web/          뷰어(index.html, viewer.js, style.css), service/(서비스 화면), vendor/(받아 둠)
-configs/      devices/<기종>.yaml, board_a3.yaml, demo_public.yaml
-scripts/      설치, 내려받기, 데모 데이터, 서버 띄우기, 메모리·디스크 감시
+configs/      devices/<기종>.yaml, board_a3.yaml, board_a2.yaml (태블릿 매트), batch.yaml (일괄 처리 기준), demo_public.yaml
+scripts/      설치, 내려받기, 데모 데이터, 서버 띄우기, 메모리·디스크 감시, glb_to_usdz.py
 tests/unit/   단위 시험
+tests/data/   시험용 실제 녹화 발췌 (stray_floor: 축 규칙)
 ```
 
 ISCO(커밋 a854879)에서 옮긴 것: `geometry/transforms.py`(+`se3_exp`, `pose_difference`), `geometry/camera.py`(시야각 대신 전체 K, OpenCV 픽셀 중심), `mesh_io.LabeledMesh`, 레이캐스팅(장면 재사용, 삼각형 번호·무게중심 반환), `utils/`, 메모리 감시·설치 스크립트.
@@ -714,7 +739,141 @@ ISCO(커밋 a854879)에서 옮긴 것: `geometry/transforms.py`(+`se3_exp`, `pos
 
 ---
 
+### 6.11 Stray 카메라 축 규칙 (11-17 고침)
+
+- 첫 실제 촬영본(아이폰으로 찍은 아이패드 두 면)에서 확인했습니다. Stray Scanner의 `odometry.csv` 자세는 **이미 OpenCV 카메라 축**(x 오른쪽, y 아래, z 앞)입니다.
+- 그런데 `flawmap/io/stray.py`는 여기에 ARKit 축을 바꾸는 `diag(1, -1, -1)`을 한 번 더 곱하고 있었습니다. 가상 촬영본은 같은 뒤집기를 거꾸로 적용해 썼기 때문에 시험에서는 드러나지 않았습니다.
+- 증거: 장면마다 LiDAR로 바닥 평면을 맞춰 바닥 법선을 비교했습니다. 뒤집기를 빼면 법선이 1.3° 안에서 일치하고 ARKit 위쪽(+y)을 향합니다. 뒤집기를 넣으면 25–27° 흩어집니다.
+- 고친 것: `ARKIT_TO_CV_CAM`(읽기)과 `CV_TO_ARKIT_CAM`(가상 촬영본 쓰기)을 둘 다 단위 행렬로 바꿨습니다. 실제 녹화 발췌(`tests/data/stray_floor/`, 자세와 깊이 8장)로 `tests/unit/test_stray_convention.py`가 이 규칙을 고정합니다.
+- **고치기 전에 만든 가상 촬영본(`data/synthetic/`)과 그 zip은 새 규칙과 맞지 않습니다.** 다른 컴퓨터에서는 해당 폴더를 지우고 `scripts/fetch_demo_data.sh`로 다시 만듭니다(`gt.json`이 있으면 건너뛰기 때문입니다).
+- 팀 서버에서는 11-17에 6개 촬영본의 `odometry.csv` 회전만 새 규칙으로 바꾸고(`R @ diag(1, -1, -1)`), `scripts/make_sample_zips.sh`로 업로드 zip을 다시 만들었습니다. 영상·깊이·정답은 그대로입니다. 같은 설정으로 다시 렌더한 것과 비교하면 회전 차이 0.000002°, 위치 차이 0입니다. 바꾸기 전 파일은 `data/synthetic_before_axis_fix/`에 있습니다.
+- 바꾸기 전에 처리한 결과(`runs/synth_*` 등)는 그대로 맞습니다. 그때는 읽기와 쓰기가 같은 뒤집기를 써서 서로 맞았기 때문입니다.
+- 실제 녹화 두 개(아이패드, 각 40장)로 다시 확인했습니다. 새 규칙에서는 장면별 바닥 법선이 평균 방향에서 중앙값 1.4°·0.4°만 벗어나고 위(+y)를 향합니다. 예전 규칙에서는 중앙값 20°·7°로 흩어지고 아래를 향합니다.
+
+### 6.12 일괄 처리 `flawmap batch` (11-17)
+
+촬영 규격 v2(7.0절)로 찍은 기기 폴더를 사람의 판단 없이 처리합니다. 무엇을 넣고, 어떻게 처리하고, 결과를 언제 받아들일지는 기기 폴더의 `manifest.yaml`과 `configs/batch.yaml`(품질 기준)이 정합니다. 기준 파일의 해시가 요약에 남아서, 같은 입력과 기준이면 같은 판정이 나옵니다.
+
+```bash
+flawmap batch data/captures                 # manifest.yaml이 있는 기기 폴더 전부
+flawmap batch data/captures/<기기> --force  # 하나만, 이미 있는 결과도 다시
+```
+
+| 단계 | 하는 일 | 미달이면 |
+|---|---|---|
+| 받기 검사 | 녹화마다 길이(궤도 45초 이상), 기기 둘레를 돈 비율(75% 이상), LiDAR 깊이 | `recapture`: 처리하지 않고 이유를 남김 |
+| 처리 | 궤도 녹화를 `pipeline.run`에 넣음. 매트가 A3/A2면 보드로, `none`이면 보드 없이 위치를 잡음. 기종 `auto`면 바닥 모자이크로 판 크기를 재고(`anchor/floor_outline.py`) 도면과 대조. 매트가 보이는 녹화는 바닥 측정을 건너뛰고 보드 경로가 크기를 잼 | 촬영 문제(`FlawmapError`)는 `recapture`, 그 밖의 오류는 `failed` |
+| 결과 검사 | 면마다 외곽 잔차 1 px 이하, 커버리지(두 면 90%, 한 면 50%), 매트를 썼으면 보드로 위치를 잡았는지 | `warn`: 결과는 남기고 이유를 적음 |
+
+결과는 `runs/batch/<이름>/`(평소 결과 폴더, 뷰어 묶음 포함)에, 요약은 `runs/batch/summary.json`과 `summary.md`(기기마다 한 줄: 상태, 기종, 크기, 하자 수, 커버리지, 외곽 잔차, 위치 방식, 이유)에 남습니다. 문제가 있는 기기(`recapture`, `failed`)가 하나라도 있으면 종료 코드가 1입니다. 시험: `tests/unit/test_batch.py`.
+
+**도면 없는 기기(태블릿)를 위해 함께 고친 것** (실제 아이패드 촬영본에서 발견):
+- `anchor/floor_outline.py`(새 파일): LiDAR 바닥 + 바닥 투영 모자이크로 크기·모서리·위치·방향을 잼. 바닥에서 다른 녹화가 깨끗하게 잰 모양을 고정해 그림자 번짐을 막고, 윗면 높이(두께)는 무늬 있는 면에서 재서 나눠 씀.
+- `poses/boardless.py`: 바닥 높이를 광축이 모이는 점이 아닌 카메라 아래에서 찾음(광축이 덜 모이면 그 점이 바닥보다 80–270 mm 아래로 감). 측정한 판의 자세를 후보로 먼저 시도.
+- `surface/maps.py`: 큰 면은 텍셀을 키움(면당 300만 개 이하; 13인치 태블릿 0.15 mm).
+- `anchor/template.py`: 모서리 반경 후보를 크기에 맞춤.
+
+**매트 위 촬영과 기종 `auto` (11-17 고침):**
+- 바닥 모자이크는 매트가 있으면 기기 대신 종이를 잽니다. 가상 A3 촬영본(`iphone12_dent_small`)에서 417.4 × 290.9 mm(종이는 420 × 297)를 쟀습니다. 그 결과 `--device auto`가 iPhone 12 대신 종이 크기의 판 모델로 끝났습니다(하자 18개, 커버리지 48.9%).
+- 그래서 `--poses auto`에서는 키프레임 8장 중 3장 이상에 보드 마커가 보이면 그 녹화의 바닥 측정을 건너뜁니다. 크기는 예전처럼 보드 경로가 휴대폰 판에서 시작해 잽니다. 같은 촬영본에서 146.61 × 71.54 mm → iPhone 12, 하자 2/2, 오탐 0으로 바닥 측정이 생기기 전 코드와 같습니다.
+- 시험: `tests/unit/test_floor_plate_board.py`.
+- 남은 한계: 매트 위의 태블릿은 기종 `auto`로 아직 재지 못합니다. 휴대폰 판에서 시작하기 때문입니다(9.1절).
+
+### 6.13 텍스처 선명도와 `--quality max` (11-17)
+
+첫 실제 촬영본(아이패드 뒷면)의 텍스처가 흐렸습니다. 원인을 재기 위해, 로고 부근 75 × 80 mm를 장면마다 0.1 mm로 펴서 비교했습니다. 선명도는 경사 에너지입니다.
+
+| 합치는 방식 | 지금 자세(ARKit + 외곽선) | COLMAP 자세 |
+|---|---|---|
+| 모든 장면의 중앙값 (원래 방식) | 17 | 21 |
+| 선명한 장면 20%만 | 122 | 173 |
+| 선명한 장면만 + 장면끼리 2D 정렬 | 193 | 210 |
+| 가장 선명한 한 장 | 509 | 510 |
+
+- **주원인은 흔들린 장면입니다.** 17–21초에 한 바퀴를 돌아서 장면들의 선명도 중간값이 가장 선명한 장면의 1/5이었고, 중앙값으로 합치면 디테일이 사라졌습니다. COLMAP으로 정렬해도 모든 장면을 섞으면 흐립니다(17 → 21).
+- **두 번째 원인은 면 안쪽의 장면 간 어긋남입니다.** 외곽선은 0.2 mm로 맞는데도 장면끼리 중간값 2.1 mm, 상위 10% 7 mm가 어긋났습니다. ARKit 흐름을 시간에 대해 부드러운 곡선으로 보정하기 때문입니다. COLMAP(바닥 무늬로 번들 조정)은 101장을 모두 정렬했고(0.76 px), 장면 간 어긋남을 상위 10% 기준 2.6 mm로 줄였습니다.
+
+`--quality max`(일괄 처리 기본값, `configs/batch.yaml`의 `process.refine`, `process.sharp_views`, `process.segment`)는 다음 세 가지를 켭니다.
+1. **COLMAP 자세 보정**(`poses/colmap.py`, 보드 없는 경로에만):
+   - 키프레임으로 SIFT, 순차 매칭, 번들 조정을 합니다. 순차 매칭은 이웃 12장과 2, 4, 8…장 떨어진 장면을 짝지어 한 바퀴를 닫습니다. 전수 매칭은 101장에 5,050쌍이라 너무 느렸습니다.
+   - 내부 파라미터는 Stray 값으로 고정합니다.
+   - 카메라 중심 기준 닮음 변환으로 같은 좌표계에 옮기고, 넓은 탐색 창(24 → 2.5 px)으로 기기를 다시 정합합니다.
+   - 등록률 80% 미만, 재투영 1.5 px 초과, 카메라 중심 차 30 mm 초과면 쓰지 않습니다. 다시 정합한 결과도 마스크 IoU가 보드 없는 자세보다 0.003 넘게 낮거나 외곽 잔차가 1.5배를 넘으면 쓰지 않습니다. 마스크가 없으면 외곽 잔차가 1.1배 안일 때만 씁니다.
+   - 실패해도 처리는 계속됩니다.
+2. **선명한 장면 우선**(`surface/maps.py`의 `prefer_sharp_views`): 면마다 장면별 선명도를 그 장면이 본 텍셀에서 잽니다(같은 영역 평균 이미지 대비 비율). 상위 30%만 남기고, 선명한 장면이 3개 미만인 텍셀은 모든 장면을 씁니다. 텍스처, 검출, 커버리지가 모두 이 선택을 따릅니다.
+3. **SAM 2 기기 마스크**(`segment/device_masks.py`, 설치는 2.2절):
+   - 첫 정합으로 키프레임 6장에 기기 상자를 주면, SAM 2(hiera-small)가 모든 키프레임에서 기기를 따라갑니다. 마스크는 프레임의 1/4 크기입니다.
+   - 쓰는 곳은 셋입니다: 투영한 모델과의 IoU로 정합을 따로 검사하고(일괄 처리 기준 0.95), COLMAP 자세를 쓸지 정하고, 마스크 밖 표본을 텍스처에서 뺍니다.
+   - 외곽 잔차만으로는 바닥 판자 이음새에 붙은 1 cm 어긋남을 못 가렸습니다(아이패드 화면, IoU 0.880 대 0.979).
+
+이 데이터의 한계: 가장 선명한 한 장과는 아직 2.5배 차이가 납니다. 선명한 장면이 적고 근접 녹화가 없기 때문입니다. 촬영 규격 v2(면마다 60–90초를 천천히, 15–20 cm 근접 녹화)가 그 차이를 줄이는 쪽입니다.
+
+**팀 서버에서 다시 확인 (11-17):** SAM 2와 체크포인트를 넣은 뒤, 같은 아이패드 녹화를 `--device auto --poses boardless`로 처리했습니다.
+
+| | 표준 | `--quality max` |
+|---|---|---|
+| 크기 (애플 281.6 × 215.5 × 5.1 mm) | 281.31 × 215.66 × 5.98 mm | 같음 |
+| 뒷면 자세 | 보드 없음, 외곽 0.772 px | COLMAP 119/141장 0.62 px → 사용, 외곽 0.724 px, 마스크 IoU 0.971 → 0.976 |
+| 화면 자세 | 보드 없음, 외곽 0.789 px | COLMAP 141/141장 등록했으나 마스크 IoU 0.879(보드 없음 0.984)라 쓰지 않음 |
+| 로고 주변 75 × 80 mm 선명도 (아틀라스 0.15 mm/px) | 18.6 | 168.4 |
+| 커버리지 | 99.8% | 99.6% |
+| 하자 (정답 없음) | 25개 (뒷면 23) | 41개 (화면 22: 외곽선 12, 안쪽 10 / 뒷면 19) |
+| 시간 | 691초 | 1,072초 |
+
+- 텍스처는 9배 선명해졌고, 뒷면의 각인 글자와 "iPad Pro" 글자가 읽힙니다.
+- 대신 장면이 적어 반사가 덜 지워집니다. 뒷면에는 대각선 반사 줄무늬가 보이고, 그 자리와 화면 안쪽에서 하자가 더 잡혔습니다.
+- 진짜 흠집인지 얼룩·반사인지는 이 해상도와 정답 없이 가릴 수 없습니다.
+- 흔들림이 없는 가상 촬영본(나무 바닥, 32장)에서는 이 모드가 장면만 줄입니다.
+  - SAM 2 IoU 0.992, COLMAP 12/32장으로 쓰지 않음.
+  - 커버리지 55.8 → 52.4%, 오탐 1 → 2.
+
+---
+
 ## 7. 촬영 안내 (팀용)
+
+### 7.0 촬영 규격 v2 — 일괄 처리용 (11-17)
+
+`flawmap batch`가 사람의 판단 없이 처리할 수 있도록 촬영 조건을 고정합니다. 실제 촬영본(아이패드)에서 생긴 문제는 대부분 조건이 매번 달라서였습니다. 찍는 사람의 그림자, ARKit 흐름 최대 30 mm, 위에서만 내려다본 촬영, 17–21초짜리 짧은 녹화가 그 예입니다.
+
+| 항목 | 규격 |
+|---|---|
+| 매트 | 휴대폰은 A3 보드(`configs/board_a3.yaml`), 태블릿은 **A2 매트**(`configs/board_a2.yaml`, 회색 영역 275 × 300 mm). 무광 용지에 실제 크기(100%)로 인쇄하고, 칸 크기(25 mm)를 자로 재서 `manifest.yaml`의 `square_mm`에 적습니다. 도면이 없는 태블릿을 `device: auto`로 처리하려면 지금은 매트 없이(`board: none`) 찍습니다(6.12절) |
+| 매트 만들기 | 도면이 있는 기종은 `flawmap board --device iphone-12`, 도면이 없으면 `flawmap board --board configs/board_a2.yaml --size 281.6 215.5 14`(길이, 폭, 모서리 반경 mm)로 놓을 자리를 인쇄합니다 |
+| 놓기 | 회색 영역의 외곽선에 맞추고, 기기 윗부분(수화부·카메라 쪽)이 화살표를 향하게 둡니다 |
+| 조명 | 천장 조명처럼 고른 빛. 찍는 사람의 그림자가 매트에 지지 않게 조명을 등지지 않습니다 |
+| 기기 상태 | 케이스·필름을 벗기고, 화면을 끄고, 마른 천으로 닦습니다 |
+| 녹화 앱 | Stray Scanner(LiDAR가 있는 iPhone Pro / iPad Pro), 깊이·신뢰도 기록 켜기 |
+
+**면마다 녹화 두 개**(화면 위, 뒷면 위 → 모두 네 개):
+
+| 녹화 | 하는 법 | 쓰는 곳 |
+|---|---|---|
+| `orbit` | 기기가 화면의 30–60%(휴대폰 25–35 cm, 태블릿 40–60 cm), 낮은(20°)·중간(45°)·높은(70°) 높이로 한 바퀴씩, 마지막에 위에서 한 번. **60–90초** | 카메라 위치, 형상, 커버리지 |
+| `close` | **15–20 cm**까지 다가가 면을 지그재그로 천천히 훑고, 테두리를 따라 한 바퀴. 30–60초 | 흠집 해상도(약 0.12 mm/픽셀) |
+
+**폴더와 `manifest.yaml`**: 기기 하나에 폴더 하나입니다. Stray 녹화 폴더를 그 안에 이름을 바꿔 넣습니다.
+
+```
+data/captures/<기기 이름>/
+  manifest.yaml
+  screen_orbit/  screen_close/  back_orbit/  back_close/     (Stray Scanner 폴더 그대로)
+  gt.yaml                                                     (선택: 실제 하자 기록, 7.5절)
+```
+
+```yaml
+name: ipad-pro13-silver        # 결과 폴더 이름
+device: auto                   # configs/devices의 기종(slug), 모르면 auto
+board: a2                      # a3 | a2 | none (매트 없이 찍었을 때)
+square_mm: 25.0                # 인쇄한 매트의 칸을 잰 값
+passes:
+  - {face: screen, kind: orbit, path: screen_orbit}
+  - {face: back,   kind: orbit, path: back_orbit}
+  - {face: screen, kind: close, path: screen_close}
+  - {face: back,   kind: close, path: back_close}
+```
+
+- 처리: `flawmap batch data/captures`(기기 폴더 여럿) 또는 `flawmap batch data/captures/<기기>`. 품질 기준은 `configs/batch.yaml`에 있고, 결과와 요약표는 `runs/batch/`에 남습니다(6.12절).
+- `close` 녹화는 지금은 받기 검사만 하고 처리에는 넣지 않습니다. 근접 텍스처 단계가 생기면 씁니다.
 
 ### 7.1 준비물
 
@@ -908,7 +1067,10 @@ defects:
 
 ### 9.1 알려진 한계
 
-- 모든 수치가 가상 촬영본과 공개 데이터에서 나왔습니다. 실제 팀 촬영본은 아직 없습니다.
+- 실제 팀 촬영본은 아이패드 한 대(두 면, 17·21초, 매트 없음)뿐이고 하자 정답이 없습니다. 하자 수치는 모두 가상 촬영본과 공개 데이터에서 나왔습니다.
+- 매트 위의 태블릿은 기종 `auto`로 크기를 재지 못합니다. 매트가 보이면 바닥 측정을 건너뛰고 휴대폰 판에서 시작하기 때문입니다(6.12절).
+- 실제 아이패드(표준 처리)에서 하자가 25개 나왔고 23개가 뒷면입니다. 텍스처에 겹쳐 보면 카메라 부위 5개, 로고 가장자리 4개, 외곽선을 따라 11개, 그림자가 진 오른쪽 아래 3개입니다. 판 모델은 카메라와 로고 자리를 모릅니다. 하자 정답이 없어 진짜 하자가 있는지는 모릅니다.
+- `--quality max`는 흔들림이 없는 가상 촬영본에서는 장면만 줄입니다(6.13절).
 - 가상 흠집이 깨짐으로 분류됩니다. 보드 없는 촬영에서는 흠집 하나를 놓쳤습니다(원인 미확인).
 - 보드 없는 경로:
   - 실제 ARKit 흐름의 모양(가상은 시간에 선형), 실제 LiDAR 바닥 잡음, 반짝이는 바닥은 시험하지 않았습니다.

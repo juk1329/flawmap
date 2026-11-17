@@ -1,0 +1,27 @@
+# Quality gates of ``flawmap batch`` (capture spec v2, docs/project_guide.md 7.0). Every decision the
+# batch takes comes from here, so a run is reproducible: the file's hash is stored in the summary.
+#
+# intake: checked on every recording before any processing (seconds). A failed hard gate marks the
+#         device "recapture" with the reason; nothing is processed.
+# result: checked on run.json after processing. A failed gate marks the device "warn" (the result is
+#         kept, the reason says what to film again).
+intake:
+  orbit:
+    min_seconds: 45          # the spec asks for 60-90 s; 17-21 s recordings left large ARKit drift
+    min_orbit_share: 0.75    # share of the twelve 30-degree sectors around the device
+    require_depth: true      # LiDAR depth and confidence (floor height, boardless poses)
+  close:
+    min_seconds: 20
+    require_depth: false
+process:
+  keyframes: 140
+  passes: [orbit]            # recording kinds that go into the pipeline today ("close": next step)
+  refine: colmap             # boardless poses refined by COLMAP on the keyframes (none: off)
+  sharp_views: true          # textures and detections from each chart's sharpest views
+  segment: true              # SAM 2 device masks: judge the registration, keep floor out of the texture
+result:
+  max_outline_px: 1.0        # median outline residual per pass after registration
+  min_coverage_both_faces: 0.90
+  min_coverage_one_face: 0.50
+  expect_board_poses: true   # a manifest with a mat (board != none) must give board poses
+  min_mask_iou: 0.95         # projected device vs SAM 2 mask, median per pass (right 0.979, 1 cm off 0.880 on the iPad)
