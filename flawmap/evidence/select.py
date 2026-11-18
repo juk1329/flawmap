@@ -142,3 +142,82 @@ def render_evidence(img: np.ndarray, px: np.ndarray, out_crop, out_full, crop_px
     full = cv2.resize(full, (full_w, int(round(h * fs))), interpolation=cv2.INTER_AREA)
     cv2.imwrite(str(out_full), cv2.cvtColor(full, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
     return {"bbox_px": [float(x0), float(y0), float(x1), float(y1)], "crop_box": [bx0, by0, bx1, by1]}
+
+
+# ---------------------------------------------------------------------------- sharpest views of every frame (plan F)
+def best_slots(dec, texels: np.ndarray, n: int = 3) -> list[tuple[int, int, float, int]]:
+    """Frames (pass index, frame index, resolution mm, bin) that saw the defect's texels finest, from a
+    decomposition's slot owners (``texture.decompose``): per bin the owner that covers most of the
+    texels, ranked by its resolution; one per bin, so the views differ in direction."""
+    if dec is None or len(texels) == 0:
+        return []
+    out = []
+    for b in range(dec.owner_frame.shape[0]):
+        f = dec.owner_frame[b, texels].astype(np.int64)
+        pss = dec.owner_pass[b, texels].astype(np.int64)
+        ok = f >= 0
+        if ok.mean() < 0.5:
+            continue
+        key = pss[ok] * 1_000_000 + f[ok]
+        uk, cnt = np.unique(key, return_counts=True)
+        k = uk[np.argmax(cnt)]
+        res = float(np.median(dec.res[b, texels][ok].astype(np.float32)))
+        out.append((int(k // 1_000_000), int(k % 1_000_000), res, b))
+    out.sort(key=lambda t: t[2])
+    seen, picked = set(), []
+    for t in out:
+        if (t[0], t[1]) in seen:
+            continue
+        seen.add((t[0], t[1]))
+        picked.append(t)
+        if len(picked) == n:
+            break
+    return picked
+
+
+def zoom_patch(img: np.ndarray, cam: Camera, T_cad_cam: np.ndarray, geom, texels: np.ndarray, albedo_img: np.ndarray | None,
+               res: float = 0.05, margin_mm: float = 3.0, model=None) -> tuple[np.ndarray, list[float]] | None:
+    """The defect's area of a face chart resampled from one frame at ``res`` mm per pixel (chart
+    axes: u right, v down), aligned by ECC (translation) to the chart's albedo, and its chart box
+    (u0, v0, u1, v1) in mm. Face charts only."""
+    if geom.chart not in ("screen", "back") or model is None:
+        return None
+    uv = geom.uv_of(texels)
+    u0, v0 = uv.min(0) - margin_mm
+    u1, v1 = uv.max(0) + margin_mm
+    W2, L2 = model.spec.width / 2.0, model.spec.length / 2.0
+    nu, nv = int(np.ceil((u1 - u0) / res)), int(np.ceil((v1 - v0) / res))
+    if nu * nv > 4_000_000:
+        return None
+    U, V = np.meshgrid(u0 + (np.arange(nu) + 0.5) * res, v0 + (np.arange(nv) + 0.5) * res)
+    if geom.chart == "screen":
+        X, Y, Z = U - W2, L2 - V, np.full_like(U, model.z_front)
+    else:
+        X, Y, Z = W2 - U, L2 - V, np.full_like(U, model.z_back)
+    P = np.stack([X.ravel(), Y.ravel(), Z.ravel()], 1)
+    Tcc = inv_T(T_cad_cam)
+    pc = P @ Tcc[:3, :3].T + Tcc[:3, 3]
+    if (pc[:, 2] <= 1.0).any():
+        return None
+    mu = (cam.fx * pc[:, 0] / pc[:, 2] + cam.cx).reshape(nv, nu).astype(np.float32)
+    mv = (cam.fy * pc[:, 1] / pc[:, 2] + cam.cy).reshape(nv, nu).astype(np.float32)
+    patch = cv2.remap(img, mu, mv, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    if albedo_img is not None:
+        # translation by ECC against the albedo crop (the poses of single frames are a few mm off)
+        r0, c0 = int(np.floor(v0 / geom.res)), int(np.floor(u0 / geom.res))
+        r1, c1 = int(np.ceil(v1 / geom.res)), int(np.ceil(u1 / geom.res))
+        H, Wc = albedo_img.shape[:2]
+        if 0 <= r0 and 0 <= c0 and r1 <= H and c1 <= Wc and (r1 - r0) > 16 and (c1 - c0) > 16:
+            ref = cv2.cvtColor(albedo_img[r0:r1, c0:c1], cv2.COLOR_RGB2GRAY).astype(np.float32)
+            small = cv2.resize(cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY).astype(np.float32), (c1 - c0, r1 - r0), interpolation=cv2.INTER_AREA)
+            M = np.eye(2, 3, dtype=np.float32)
+            try:
+                _, M = cv2.findTransformECC(ref, small, M, cv2.MOTION_TRANSLATION,
+                                            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 60, 1e-4), None, 3)
+                k = geom.res / res
+                if np.hypot(M[0, 2], M[1, 2]) * geom.res <= 4.0:
+                    S = np.float32([[1, 0, M[0, 2] * k], [0, 1, M[1, 2] * k]])
+                    patch = cv2.warpAffine(patch, S, (nu, nv), flags=cv2.INTER_CUBIC + cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE)
+            except cv2.error:
+                pass
+    return patch, [float(u0), float(v0), float(u0 + nu * res), float(v0 + nv * res)]

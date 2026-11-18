@@ -67,6 +67,17 @@ def device_masks(frames: dict[int, np.ndarray], prompt_boxes: dict[int, np.ndarr
     masks of two 100-frame passes ran a 32 GB PC into the memory guard) for every frame in
     ``frames`` (time order = key order), prompted with boxes (x0, y0, x1, y1 in full-frame pixels)
     on the frames in ``prompt_boxes``."""
+    prompts = {i: {"box": b} for i, b in prompt_boxes.items() if b is not None}
+    return track_device(frames, prompts, max_side=max_side, out_scale=out_scale, log=log)
+
+
+def track_device(frames: dict[int, np.ndarray], prompts: dict[int, dict], max_side: int = 1024, out_scale: float = 0.25,
+                 log=print) -> dict[int, np.ndarray]:
+    """SAM 2 video masks of one object (the device) for every frame in ``frames`` (time order = key
+    order). ``prompts[frame]`` holds any of ``box`` (x0, y0, x1, y1), ``points`` (n, 2) and ``labels``
+    (n,: 1 inside the device, 0 outside), all in full-frame pixels, or a ``mask`` (bool, any size).
+    Propagated forwards and backwards from the prompted frames; a frame's mask is the union of the
+    two directions."""
     import torch
     from sam2.build_sam import build_sam2_video_predictor
 
@@ -80,12 +91,27 @@ def device_masks(frames: dict[int, np.ndarray], prompt_boxes: dict[int, np.ndarr
             cv2.imwrite(str(work / f"{j:05d}.jpg"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 92])
         predictor = build_sam2_video_predictor(CONFIG, str(data_root() / CHECKPOINT), device="cuda")
         out: dict[int, np.ndarray] = {}
+        n_prompted = 0
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             state = predictor.init_state(video_path=str(work), offload_video_to_cpu=True, offload_state_to_cpu=True)
             pos = {i: j for j, i in enumerate(ids)}
-            for i, b in prompt_boxes.items():
-                if i in pos and b is not None:
-                    predictor.add_new_points_or_box(state, frame_idx=pos[i], obj_id=1, box=np.asarray(b, np.float32) * s)
+            for i, pr in prompts.items():
+                if i not in pos or not pr:
+                    continue
+                if pr.get("mask") is not None:
+                    predictor.add_new_mask(state, frame_idx=pos[i], obj_id=1, mask=np.asarray(pr["mask"], bool))
+                    n_prompted += 1
+                    continue
+                kw = {}
+                if pr.get("box") is not None:
+                    kw["box"] = np.asarray(pr["box"], np.float32) * s
+                if pr.get("points") is not None and len(pr["points"]):
+                    kw["points"] = np.asarray(pr["points"], np.float32) * s
+                    kw["labels"] = np.asarray(pr["labels"], np.int32)
+                if not kw:
+                    continue
+                predictor.add_new_points_or_box(state, frame_idx=pos[i], obj_id=1, **kw)
+                n_prompted += 1
             for reverse in (False, True):
                 for j, _, logits in predictor.propagate_in_video(state, reverse=reverse):
                     m = (logits[0, 0] > 0.0).float().cpu().numpy()
@@ -96,10 +122,38 @@ def device_masks(frames: dict[int, np.ndarray], prompt_boxes: dict[int, np.ndarr
             predictor.reset_state(state)
         del predictor
         torch.cuda.empty_cache()
-        log(f"  sam2: masks for {len(out)}/{len(ids)} frames, prompted on {len(prompt_boxes)}")
+        log(f"  sam2: masks for {len(out)}/{len(ids)} frames, prompted on {n_prompted}")
         return out
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def object_hypotheses(frames: dict[int, np.ndarray], points: dict[int, np.ndarray], max_side: int = 1024) -> dict[int, list]:
+    """SAM 2's nested answers (part, larger part, whole object) to one positive point per frame:
+    ``{frame: [(mask bool at the frame's size, predicted IoU), ...]}``. A single point is ambiguous
+    (a point on the iPad's logo gave the logo, 32 x 31 mm, 2026-11-17); the caller picks the
+    hypothesis whose size makes sense."""
+    import torch
+    from sam2.build_sam import build_sam2
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+    model = build_sam2(CONFIG, str(data_root() / CHECKPOINT), device="cuda")
+    pred = SAM2ImagePredictor(model)
+    out = {}
+    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+        for i, pt in points.items():
+            img = frames[i]
+            h, w = img.shape[:2]
+            s = min(1.0, max_side / max(h, w))
+            small = img if s == 1.0 else cv2.resize(img, (int(round(w * s)), int(round(h * s))), interpolation=cv2.INTER_AREA)
+            pred.set_image(small)
+            masks, scores, _ = pred.predict(point_coords=np.asarray(pt, np.float32).reshape(1, 2) * s,
+                                            point_labels=np.ones(1, np.int32), multimask_output=True)
+            out[i] = [(cv2.resize(m.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0, float(sc))
+                      for m, sc in zip(masks, scores)]
+    del pred, model
+    torch.cuda.empty_cache()
+    return out
 
 
 def mask_iou(a: np.ndarray, b: np.ndarray) -> float:

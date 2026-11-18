@@ -67,7 +67,9 @@ class SynthConfig:
     dents: list = field(default_factory=list)        # [{s, v, radius, depth}] frame-chart mm: geometric dents
     seed: int = 0
     fps: float = 30.0
-    background: str = "board"                        # board | wood | paper | cloth (no board: an ordinary floor)
+    background: str = "board"                        # board | wood | paper | cloth | dark | pattern (no board: an ordinary floor)
+    design: list = field(default_factory=list)       # [{kind: logo|print, chart, u, v, size}] marks that are no defects
+    shadow: bool = False                             # a soft shadow of the photographer on the floor beside the device
 
 
 # ----------------------------------------------------------------------------- appearance
@@ -119,17 +121,61 @@ def _paint_decal(alpha: np.ndarray, ids: np.ndarray, d: Decal, did: int, res: fl
     ids[mask > 64] = did
 
 
-def build_textures(model: DeviceModel, decals: list[Decal], res: float, seed: int):
-    """Per chart: fine surface variation, defect alpha and defect ids (GT masks)."""
+def _paint_design(logo: np.ndarray, prn: np.ndarray, e: dict, res: float, rng: np.random.Generator) -> None:
+    """Marks that are no defects (plan G): a ``logo`` (a filled disc with a bite and a leaf, glossy)
+    and ``print`` (a row of small glyph-like strokes, matte grey)."""
+    cu, cv = e["u"] / res, e["v"] / res
+    if e["kind"] == "logo":
+        r = e["size"] / 2 / res
+        m = np.zeros(logo.shape, np.uint8)
+        cv2.circle(m, (int(round(cu)), int(round(cv))), int(round(r)), 1, -1, cv2.LINE_AA)
+        cv2.circle(m, (int(round(cu + 0.95 * r)), int(round(cv - 0.2 * r))), int(round(0.35 * r)), 0, -1, cv2.LINE_AA)
+        cv2.ellipse(m, (int(round(cu + 0.1 * r)), int(round(cv - 1.25 * r))), (int(round(0.18 * r)), int(round(0.35 * r))), 30, 0, 360, 1, -1)
+        logo[:] = np.maximum(logo, m.astype(np.float32))
+        return
+    h = e.get("height", 2.4) / res
+    n = int(e.get("glyphs", 8))
+    w = e["size"] / max(n, 1) / res                     # glyph pitch (px)
+    gw = min(0.8 * w, 0.95 * h)                          # glyphs about as wide as tall, like letters
+    m = np.zeros(prn.shape, np.uint8)
+    thick = max(1, int(round(0.22 / res)))
+    for k in range(n):
+        x0 = (e["u"] - e["size"] / 2) / res + k * w
+        y0, y1 = int(cv - h / 2), int(cv + h / 2)
+        xa, xb = int(x0), int(x0 + gw)
+        kind = rng.integers(0, 4)
+        if kind == 0:                                    # a box
+            cv2.rectangle(m, (xa, y0), (xb, y1), 1, thick)
+        elif kind == 1:                                  # a ring
+            cv2.ellipse(m, ((xa + xb) // 2, int(cv)), (max(1, (xb - xa) // 2), max(1, (y1 - y0) // 2)), 0, 0, 360, 1, thick)
+        elif kind == 2:                                  # an S-like zigzag of bars
+            cv2.line(m, (xa, y0), (xb, y0), 1, thick); cv2.line(m, (xb, y0), (xb, int(cv)), 1, thick)
+            cv2.line(m, (xa, int(cv)), (xb, int(cv)), 1, thick); cv2.line(m, (xa, int(cv)), (xa, y1), 1, thick)
+            cv2.line(m, (xa, y1), (xb, y1), 1, thick)
+        else:                                            # a cross with a bar
+            cv2.line(m, ((xa + xb) // 2, y0), ((xa + xb) // 2, y1), 1, thick); cv2.line(m, (xa, int(cv)), (xb, int(cv)), 1, thick)
+            cv2.line(m, (xa, y0), (xb, y0), 1, thick)
+    prn[:] = np.maximum(prn, m.astype(np.float32))
+
+
+def build_textures(model: DeviceModel, decals: list[Decal], res: float, seed: int, design: list | None = None):
+    """Per chart: fine surface variation, defect alpha and defect ids (GT masks), and the design
+    layers (``logo``, ``print``: alpha, not defects)."""
     rng = np.random.default_rng(seed)
     tex = {}
     for chart in CHARTS:
         alpha, ids = _chart_canvas(model, chart, res)
         var = cv2.GaussianBlur(rng.normal(0, 1, alpha.shape).astype(np.float32), (0, 0), 3.0)
         var = 1.0 + 0.03 * var / (var.std() + 1e-6)
-        tex[chart] = {"var": var, "alpha": alpha, "ids": ids}
+        tex[chart] = {"var": var, "alpha": alpha, "ids": ids, "logo": np.zeros_like(alpha), "print": np.zeros_like(alpha)}
     for k, d in enumerate(decals):
         _paint_decal(tex[d.chart]["alpha"], tex[d.chart]["ids"], d, k + 1, res, np.random.default_rng(d.seed + 1000 * k))
+    for k, e in enumerate(design or []):
+        t = tex[e["chart"]]
+        _paint_design(t["logo"], t["print"], e, res, np.random.default_rng(seed + 77 + k))
+    for t in tex.values():
+        t["logo"] = cv2.GaussianBlur(t["logo"], (0, 0), 0.8)
+        t["print"] = cv2.GaussianBlur(t["print"], (0, 0), 0.6)
     return tex
 
 
@@ -217,6 +263,16 @@ def floor_texture(kind: str, rng: np.random.Generator, half_mm: float = 600.0, p
         weave = np.sin(2 * np.pi * xx / 1.3) * np.sin(2 * np.pi * yy / 1.3)
         tone = 1.0 + 0.06 * weave + 0.05 * field(15.0) + 0.02 * rng.normal(0, 1, (n, n)).astype(np.float32)
         img = tone[..., None] * np.array([0.55, 0.57, 0.60], np.float32)
+    elif kind == "dark":
+        # a matte black table: about the colour of a black phone's frame and back
+        tone = 1.0 + 0.05 * field(20.0) + 0.03 * rng.normal(0, 1, (n, n)).astype(np.float32)
+        img = tone[..., None] * np.array([0.10, 0.10, 0.11], np.float32)
+    elif kind == "pattern":
+        # a dense high-contrast print (tablecloth, magazine): small checks and dots
+        chk = ((np.floor(xx / 4.0) + np.floor(yy / 4.0)) % 2).astype(np.float32)
+        dots = (np.hypot((xx % 7.0) - 3.5, (yy % 7.0) - 3.5) < 1.2).astype(np.float32)
+        tone = 0.35 + 0.45 * chk - 0.25 * dots + 0.03 * rng.normal(0, 1, (n, n)).astype(np.float32)
+        img = tone[..., None] * np.array([0.95, 0.88, 0.80], np.float32)
     else:
         raise ValueError(f"unknown background {kind!r}")
     return np.clip(img, 0, 1)
@@ -270,6 +326,11 @@ def render_frame(model: DeviceModel, scene: RaycastScene, tex: dict, colors: dic
     img[on_plane] = table
     if inside.any():
         img[inside] = _sample(board_img, pu[inside], pv[inside]) * 0.92
+    if cfg.shadow and on_plane.any():
+        # the photographer's soft shadow: a large dark ellipse on the floor beside the device (static)
+        sx, sy = P[on_plane, 0] - 110.0, P[on_plane, 1] + 60.0
+        sh = np.exp(-0.5 * ((sx / 90.0) ** 2 + (sy / 60.0) ** 2))
+        img[on_plane] *= (1.0 - 0.45 * sh)[:, None]
     depth[on_plane] = (t_plane[on_plane] * (d_cam[on_plane, 2] / np.linalg.norm(d_cam[on_plane], axis=1))).astype(np.float32)
     # --- device
     if hit.any():
@@ -290,6 +351,8 @@ def render_frame(model: DeviceModel, scene: RaycastScene, tex: dict, colors: dic
                 ks[sel], shin[sel], env_k[sel] = PART_SHADING[pname]
         var = np.ones(len(face), np.float32)
         alpha = np.zeros(len(face), np.float32)
+        logo_a = np.zeros(len(face), np.float32)
+        print_a = np.zeros(len(face), np.float32)
         dids = np.zeros(len(face), np.int16)
         res = cfg.texture_mm_per_px
         for ci, cname in enumerate(CHARTS):
@@ -300,6 +363,8 @@ def render_frame(model: DeviceModel, scene: RaycastScene, tex: dict, colors: dic
             px, py = uv[sel, 0] / res, uv[sel, 1] / res
             var[sel] = _sample(t["var"], px, py)
             alpha[sel] = _sample(t["alpha"], px, py)
+            logo_a[sel] = _sample(t["logo"], px, py)
+            print_a[sel] = _sample(t["print"], px, py)
             ix = np.clip(np.round(px).astype(int), 0, t["ids"].shape[1] - 1)
             iy = np.clip(np.round(py).astype(int), 0, t["ids"].shape[0] - 1)
             dids[sel] = t["ids"][iy, ix]
@@ -314,6 +379,11 @@ def render_frame(model: DeviceModel, scene: RaycastScene, tex: dict, colors: dic
         r = 2 * np.einsum("ij,ij->i", n_w, v)[:, None] * n_w - v
         refl = _env(r)
         shade = col * (0.35 + diffuse)[:, None] + (ks * spec * 0.6)[:, None] + (env_k * refl)[:, None] * 0.6
+        # design marks (no defects): a glossy darker logo, matte darker print
+        if logo_a.any() or print_a.any():
+            logo_col = col * 0.45 * (0.35 + diffuse)[:, None] + (1.2 * env_k * refl)[:, None] * 0.6
+            shade = shade * (1 - logo_a[:, None]) + logo_col * logo_a[:, None]
+            shade = shade * (1 - 0.45 * print_a[:, None])
         # defects: silver chip (glossy, lighter than any paint), bright cracks; scratches fade with angle
         kind = np.array([cfg.decals[i - 1].kind if i > 0 else "" for i in range(len(cfg.decals) + 1)])
         dk = kind[np.clip(dids, 0, len(kind) - 1)] if len(cfg.decals) else np.full(len(face), "")
@@ -380,7 +450,7 @@ def render_capture(cfg: SynthConfig, out: str | Path, progress: bool = True) -> 
     T_world_cad = make_T(rot_z(dyaw), [dx, dy, 0.0]) @ rest_pose(model, cfg.face_up)
     model = apply_dents(model, cfg.dents)
     scene = RaycastScene(model.mesh, T_world_cad)
-    tex = build_textures(model, decals, cfg.texture_mm_per_px, cfg.seed)
+    tex = build_textures(model, decals, cfg.texture_mm_per_px, cfg.seed, cfg.design)
     bspec = BoardSpec.load()
     if cfg.background == "board":
         bspec.px_per_mm = cfg.board_px_per_mm
@@ -415,6 +485,7 @@ def render_capture(cfg: SynthConfig, out: str | Path, progress: bool = True) -> 
     gt = {"config": {k: v for k, v in asdict(cfg).items() if k != "decals"}, "device": cfg.device, "face_up": cfg.face_up,
           "T_world_cad": T_world_cad, "decals": [asdict(d) for d in decals], "dents": list(cfg.dents), "frames": gt_frames,
           "board_square_mm": bspec.square_mm if cfg.background == "board" else None, "background": cfg.background,
+          "design": list(cfg.design), "shadow": cfg.shadow,
           "note": "synthetic capture; T_world_* are in the board (floor) frame (mm)"}
     write_json(out / "gt.json", gt)
     return out
@@ -435,6 +506,13 @@ DEMO_DECALS = [
 ]
 
 
+DESIGN_MARKS = [   # a phone back's logo and print, placed clear of DEMO_DECALS (back chart mm, 71.5 x 146.7)
+    {"kind": "logo", "chart": "back", "u": 36.0, "v": 120.0, "size": 14.0},
+    {"kind": "print", "chart": "back", "u": 36.0, "v": 134.0, "size": 18.0, "glyphs": 7, "height": 2.2},
+    {"kind": "print", "chart": "back", "u": 36.0, "v": 139.0, "size": 26.0, "glyphs": 12, "height": 1.4},
+]
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -448,8 +526,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--preset", choices=["demo", "small", "small-v1", "dents"], default=None,
                    help="demo: 166 frames, 7 defects + dent (default); small: 32 frames, same defects; small-v1: 32 frames, "
                         "the first 5 defects, no dent (iphone12_back_small); dents: 50 frames, two dents only (iphone12_dent_small)")
-    p.add_argument("--background", default="board", choices=["board", "wood", "paper", "cloth"],
-                   help="what the device lies on: the printed board, or an ordinary floor without any board")
+    p.add_argument("--background", default="board", choices=["board", "wood", "paper", "cloth", "dark", "pattern"],
+                   help="what the device lies on: the printed board, or an ordinary floor without any board "
+                        "(dark: about the device's colour; pattern: dense high-contrast print)")
+    p.add_argument("--design", action="store_true", help="add a logo and two print rows on the back (marks that are no defects)")
+    p.add_argument("--shadow", action="store_true", help="a soft shadow on the floor beside the device")
     p.add_argument("--arkit-drift-mm", type=float, default=8.0, help="end-to-end ARKit translation drift")
     p.add_argument("--arkit-drift-deg", type=float, default=0.6)
     p.add_argument("--placement-jitter", type=float, nargs=3, default=None, metavar=("DX", "DY", "YAW"),
@@ -458,6 +539,9 @@ def main(argv: list[str] | None = None) -> int:
     cfg = SynthConfig(device=a.device, face_up=a.face_up, seed=a.seed, decals=[] if a.no_defects else list(DEMO_DECALS),
                       dents=[] if a.no_defects else list(DEMO_DENTS), background=a.background,
                       arkit_drift_mm=a.arkit_drift_mm, arkit_drift_deg=a.arkit_drift_deg)
+    if a.design:
+        cfg.design = list(DESIGN_MARKS)
+    cfg.shadow = bool(a.shadow)
     if a.placement_jitter is not None:
         cfg.placement_jitter = tuple(a.placement_jitter)
     elif a.background != "board":

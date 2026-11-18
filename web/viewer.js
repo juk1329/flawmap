@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 const $ = (id) => document.getElementById(id);
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -123,8 +124,20 @@ function evidenceText(d) {
   const c = d.channels || {};
   const parts = [];
   if (c.outline_mm) parts.push('기기 윤곽의 들어간 모양');
-  if (c.appearance) parts.push(d.type === 'crack' || d.type === 'scratch' ? '유리 위의 가는 선' : '도장이 벗겨진 색');
+  const ch = d.detector?.channel || '';
+  if (ch.includes('surface line')) parts.push('반사를 뺀 표면색의 가는 선');
+  if (ch.includes('fixed glint')) parts.push(`여러 방향(${d.detector.signals?.glint_bins ?? 2}곳)에서 같은 자리에 번쩍임`);
+  if (ch.includes('surface spot')) parts.push('반사를 뺀 표면색의 점 자국');
+  if (!ch && c.appearance) parts.push(d.type === 'crack' || d.type === 'scratch' ? '유리 위의 가는 선' : '도장이 벗겨진 색');
   return parts.join(', ');
+}
+
+// how unlike the rest of its own face the spot looks (DINOv2 patches, a robust z-score within the face);
+// shown as information only. In the synthetic tests real marks scored 5 or more, rim and edge
+// artefacts 1.5-2.6.
+function rarityText(z) {
+  const word = z >= 5 ? '주변과 뚜렷이 다름' : z >= 3 ? '주변과 조금 다름' : '주변과 비슷함 (반사·가장자리일 수 있음)';
+  return `${word}, ${z.toFixed(1)}`;
 }
 
 function showDetail(d) {
@@ -135,7 +148,16 @@ function showDetail(d) {
     `<dt>부위</dt><dd>${d.part_ko}</dd>` +
     `<dt>크기</dt><dd>${sizeText(d)}</dd>` +
     (evidenceText(d) ? `<dt>찾은 근거</dt><dd>${evidenceText(d)}</dd>` : '') +
-    `<dt>확실한 정도</dt><dd>${CONF_KO[d.confidence] || d.confidence} (본 장면 ${d.n_views}개 중 ${Math.round(d.persistence * 100)}%에서 보임)</dd>`;
+    `<dt>확실한 정도</dt><dd>${CONF_KO[d.confidence] || d.confidence} (본 장면 ${d.n_views}개 중 ${Math.round(d.persistence * 100)}%에서 보임)</dd>` +
+    (d.channels?.rarity_z != null ? `<dt>면에서 드문 정도</dt><dd>${rarityText(d.channels.rarity_z)}</dd>` : '');
+  if (d.zoom) {
+    $('dZoom').hidden = false;
+    $('dZoomImg').src = base + d.zoom.img;
+    $('dZoomImg').alt = `${d.label_ko} 확대`;
+    $('dZoomCap').textContent = `가장 선명하게 찍힌 장면(${d.zoom.pass === 'back' ? '뒷면 위 촬영' : '화면 위 촬영'} ${fmtTime(d.zoom.time_s)})을 표면에 펴서 0.05 mm 간격으로 확대한 모습입니다. 3D 화면에서 가까이 다가가면 이 확대 사진이 그 자리에 겹쳐 보입니다.`;
+  } else {
+    $('dZoom').hidden = true;
+  }
   const ev = $('dEvidence');
   ev.innerHTML = '';
   d.evidence.forEach((e, k) => {
@@ -157,10 +179,45 @@ function select(id, moveCamera) {
   const d = defects.find((x) => x.id === id);
   if (!d) return;
   showDetail(d);
+  openLoupe(d);
   if (moveCamera && mode === 'model') flyTo(d);
   if (mode === 'spin') jumpSpinTo(d);
   drawSpinOverlay();
 }
+
+// ------------------------------------------------------------------ the loupe beside the pin
+let loupe = { d: null, k: 0 };
+function loupeFrames(d) { return d.evidence || []; }
+function openLoupe(d) {
+  loupe = { d, k: 0 };
+  const ev = loupeFrames(d);
+  $('loupeTitle').textContent = `${d.id}번 ${d.label_ko}, ${d.location_ko}`;
+  const lensSrc = d.zoom ? base + d.zoom.img : (ev[0] ? base + ev[0].crop : '');
+  $('loupeLens').src = lensSrc;
+  $('loupeLens').alt = d.zoom ? `${d.label_ko}을 0.05 mm 간격으로 확대한 표면` : `${d.label_ko}이 보이는 장면`;
+  showLoupeFrame();
+  $('loupe').hidden = mode !== 'model';
+}
+function showLoupeFrame() {
+  const d = loupe.d;
+  if (!d) return;
+  const ev = loupeFrames(d);
+  const e = ev[loupe.k];
+  $('loupePrev').disabled = loupe.k <= 0;
+  $('loupeNext').disabled = loupe.k >= ev.length - 1;
+  $('loupeIdx').textContent = ev.length ? `${loupe.k + 1} / ${ev.length}` : '';
+  if (!e) { $('loupeFrame').removeAttribute('src'); $('loupeCap').textContent = '이 하자를 보여 줄 장면이 없습니다.'; return; }
+  $('loupeFrame').src = base + e.crop;
+  $('loupeFrame').alt = `${d.label_ko}이 보이는 실제 장면 ${loupe.k + 1}`;
+  const res = e.res_mm ? `, 화소당 ${e.res_mm.toFixed(2)} mm` : '';
+  $('loupeCap').textContent = `${e.pass === 'back' ? '뒷면 위 촬영' : '화면 위 촬영'}, 영상 ${fmtTime(e.time_s)}${res}` +
+    (e.source === 'all frames' ? ', 영상 전체에서 가장 선명한 장면' : '');
+}
+$('loupePrev').addEventListener('click', () => { loupe.k = Math.max(0, loupe.k - 1); showLoupeFrame(); });
+$('loupeNext').addEventListener('click', () => { loupe.k = Math.min(loupeFrames(loupe.d).length - 1, loupe.k + 1); showLoupeFrame(); });
+$('loupeShot').addEventListener('click', () => { const e = loupeFrames(loupe.d)[loupe.k]; if (e) openModal(loupe.d, e); });
+$('loupeClose').addEventListener('click', closeLoupe);
+function closeLoupe() { $('loupe').hidden = true; loupe.d = null; $('leaderLine').setAttribute('x1', 0); $('leaderLine').setAttribute('x2', 0); }
 
 // ------------------------------------------------------------------ modal and video
 let modalEv = null;
@@ -189,8 +246,11 @@ function playAt(pass, t) {
 }
 $('playerClose').addEventListener('click', () => { $('video').pause(); $('player').hidden = true; });
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape') { closeModal(); }
+  if (ev.key === 'Escape') { if (!$('modal').hidden) closeModal(); else closeLoupe(); }
   if (mode === 'spin' && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) stepSpin(ev.key === 'ArrowRight' ? 1 : -1);
+  if (mode === 'model' && loupe.d && !$('loupe').hidden && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) {
+    (ev.key === 'ArrowRight' ? $('loupeNext') : $('loupePrev')).click();
+  }
 });
 
 // ------------------------------------------------------------------ 3D view
@@ -207,8 +267,12 @@ controls.enableDamping = !reduceMotion;
 controls.dampingFactor = 0.12;
 controls.minDistance = 0.08;
 controls.maxDistance = 0.9;
-scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa0a8, 1.25));
-const headlight = new THREE.DirectionalLight(0xffffff, 1.4);
+// realistic surfaces: an indoor environment for reflections (glass and metal), plus a soft fill and
+// a headlight; the measured roughness map decides how glossy each spot is
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa0a8, 0.7));
+const headlight = new THREE.DirectionalLight(0xffffff, 0.9);
 scene.add(headlight);
 
 const passes = data.capture.passes.map((p) => p.face_up);
@@ -219,22 +283,95 @@ const tl = new THREE.TextureLoader();
 function loadTex(url) {
   return new Promise((res, rej) => tl.load(url, (t) => { t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = renderer.capabilities.getMaxAnisotropy(); res(t); }, undefined, rej));
 }
-const [gltf, tex, ovl] = await Promise.all([
+const optTex = (name) => (data.files[name] ? loadTex(base + data.files[name]).catch(() => null) : Promise.resolve(null));
+const [gltf, tex, ovl, ovlFill, dsg, rough] = await Promise.all([
   new GLTFLoader().loadAsync(base + data.files.model), loadTex(base + data.files.texture), loadTex(base + data.files.overlay),
+  optTex('overlay_fill'), optTex('design'), optTex('roughness'),
 ]);
 let mesh = null;
 gltf.scene.traverse((o) => { if (o.isMesh && !mesh) mesh = o; });
 // the exported glTF carries positions and UVs only; lighting needs normals
 if (!mesh.geometry.attributes.normal) mesh.geometry.computeVertexNormals();
-mesh.material = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.55, metalness: 0.05, side: THREE.DoubleSide });
+if (rough) rough.colorSpace = THREE.NoColorSpace;
+mesh.material = new THREE.MeshStandardMaterial({
+  map: tex, roughness: rough ? 1.0 : 0.55, roughnessMap: rough || null, metalness: 0.0, envMapIntensity: 0.9, side: THREE.DoubleSide,
+});
 scene.add(mesh);
-const overlay = new THREE.Mesh(mesh.geometry, new THREE.MeshBasicMaterial({
-  map: ovl, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, side: THREE.DoubleSide,
-}));
-overlay.position.copy(mesh.position); overlay.quaternion.copy(mesh.quaternion); overlay.scale.copy(mesh.scale);
-scene.add(overlay);
-$('showDefects').addEventListener('change', (e) => { overlay.visible = e.target.checked; });
+function overlayMesh(map, order) {
+  const m = new THREE.Mesh(mesh.geometry, new THREE.MeshBasicMaterial({
+    map, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 - order, polygonOffsetUnits: -2 - order,
+    side: THREE.DoubleSide,
+  }));
+  m.position.copy(mesh.position); m.quaternion.copy(mesh.quaternion); m.scale.copy(mesh.scale);
+  m.renderOrder = 1 + order;
+  scene.add(m);
+  return m;
+}
+// outlines on the real surface by default; "하자 강조" fills them
+const overlay = overlayMesh(ovl, 1);
+const overlayFill = ovlFill ? overlayMesh(ovlFill, 2) : null;
+if (overlayFill) overlayFill.visible = false;
+$('showDefects').addEventListener('change', (e) => {
+  if (overlayFill) { overlayFill.visible = e.target.checked; overlay.visible = !e.target.checked; }
+});
+const designMesh = dsg ? overlayMesh(dsg, 0) : null;
+if (designMesh) {
+  designMesh.visible = false;
+  $('designToggle').hidden = false;
+  $('designLegend').hidden = false;
+  $('showDesign').addEventListener('change', (e) => { designMesh.visible = e.target.checked; });
+}
 $('status3d').textContent = '';
+
+// zoom patches: the finest frame of each face defect, resampled at 0.05 mm, laid on the surface and
+// shown when the camera comes close to it
+const zoomQuads = [];
+// the patch fades out towards its border so it blends into the model's own texture
+let _feather = null;
+function featherMap() {
+  if (_feather) return _feather;
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(64, 64, 34, 64, 64, 64);
+  grd.addColorStop(0, '#fff'); grd.addColorStop(1, '#000');
+  g.fillStyle = grd; g.fillRect(0, 0, 128, 128);
+  _feather = new THREE.CanvasTexture(c);
+  return _feather;
+}
+{
+  const W2 = data.device.width_mm / 2, L2 = data.device.length_mm / 2, T2 = data.device.thickness_mm / 2;
+  for (const d of defects) {
+    if (!d.zoom || (d.chart !== 'screen' && d.chart !== 'back')) continue;
+    const [u0, v0, u1, v1] = d.zoom.uv_box;
+    const lift = 0.06;   // mm above the face, against z-fighting
+    const P = (u, v) => (d.chart === 'screen' ? [u - W2, L2 - v, T2 + lift] : [W2 - u, L2 - v, -T2 - lift]).map((x) => x * 0.001);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute([...P(u0, v0), ...P(u1, v0), ...P(u1, v1), ...P(u0, v1)], 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+    g.setIndex([0, 1, 2, 0, 2, 3]);
+    const mat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false, alphaMap: featherMap() });
+    const q = new THREE.Mesh(g, mat);
+    q.renderOrder = 4;
+    q.visible = false;
+    scene.add(q);
+    const c = new THREE.Vector3(...P((u0 + u1) / 2, (v0 + v1) / 2));
+    zoomQuads.push({ d, q, c, loaded: false });
+  }
+}
+function updateZoomQuads() {
+  for (const z of zoomQuads) {
+    const dist = camera.position.distanceTo(z.c);
+    const near = dist < 0.11 * viewScale || (selected === z.d.id && dist < 0.2 * viewScale);
+    if (near && !z.loaded) {
+      z.loaded = true;
+      loadTex(base + z.d.zoom.img).then((t) => { z.q.material.map = t; z.q.material.needsUpdate = true; });
+    }
+    const target = near && z.q.material.map ? 1 : 0;
+    z.q.material.opacity += (target - z.q.material.opacity) * 0.2;
+    z.q.visible = z.q.material.opacity > 0.02;
+  }
+}
 
 // defect-id lookup in the atlas (R channel = id)
 const idImg = new Image();
@@ -313,6 +450,8 @@ window.addEventListener('resize', resize);
 resize();
 
 function frame(now) {
+  // the real-video view hides the 3D canvas: nothing to draw until it comes back
+  if (mode !== 'model') { requestAnimationFrame(frame); return; }
   if (anim) {
     const k = Math.min(1, (now - anim.t0) / anim.dur);
     const e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
@@ -322,6 +461,7 @@ function frame(now) {
   }
   controls.update();
   headlight.position.copy(camera.position);
+  updateZoomQuads();
   renderer.render(scene, camera);
   const r = canvas.getBoundingClientRect();
   for (const pin of pinEls) {
@@ -331,10 +471,82 @@ function frame(now) {
     pin.el.style.top = `${(-tmp.y * 0.5 + 0.5) * r.height}px`;
     pin.el.classList.toggle('behind', !facing);
     pin.el.style.display = tmp.z < 1 ? '' : 'none';
+    if (loupe.d && pin.d.id === loupe.d.id) placeLoupe((tmp.x * 0.5 + 0.5) * r.width, (-tmp.y * 0.5 + 0.5) * r.height, r, tmp.z < 1);
   }
+  updateInset(now);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+function placeLoupe(px, py, r, onScreen) {
+  const el = $('loupe');
+  if (el.hidden) return;
+  const narrow = window.matchMedia('(max-width: 900px)').matches;
+  const line = $('leaderLine');
+  if (narrow || !onScreen) { line.setAttribute('x1', 0); line.setAttribute('x2', 0); line.setAttribute('y1', 0); line.setAttribute('y2', 0); return; }
+  const w = el.offsetWidth, h = el.offsetHeight, gap = 46;
+  const right = px + gap + w < r.width - 12;
+  let x = right ? px + gap : px - gap - w;
+  x = Math.max(12, Math.min(r.width - w - 12, x));
+  let y = Math.max(12, Math.min(r.height - h - 12, py - h / 2));
+  el.style.left = `${x}px`;
+  el.style.top = `${y}px`;
+  const lx = right ? x : x + w;
+  line.setAttribute('x1', px); line.setAttribute('y1', py);
+  line.setAttribute('x2', lx); line.setAttribute('y2', Math.max(y + 20, Math.min(y + h - 20, py)));
+}
+
+// ------------------------------------------------------------------ the real frame from the 3D view's direction
+// every keyframe of the 360 view knows where it was taken from (around the device, height above it);
+// the 3D view's direction picks the nearest one, shown in the corner and used when switching views
+const spinDirs = [];
+(data.spin?.passes || []).forEach((p, pi) => p.bands.forEach((b, bi) => b.frames.forEach((f, fi) => {
+  const az = f.az * Math.PI / 180, el = f.el * Math.PI / 180, s = p.name === 'back' ? -1 : 1;
+  spinDirs.push({ pi, bi, fi, v: new THREE.Vector3(Math.cos(el) * Math.cos(az), Math.cos(el) * Math.sin(az), s * Math.sin(el)) });
+})));
+function nearestSpin(dir) {
+  let best = null, bd = -2;
+  for (const s of spinDirs) { const c = s.v.dot(dir); if (c > bd) { bd = c; best = s; } }
+  return best;
+}
+let insetAt = null, insetT = 0;
+const insetDir = new THREE.Vector3();
+function updateInset(now) {
+  const el = $('inset');
+  if (!spinDirs.length || mode !== 'model') { el.hidden = true; return; }
+  if (now - insetT < 150) return;
+  insetT = now;
+  insetDir.copy(camera.position).sub(controls.target).normalize();
+  const s = nearestSpin(insetDir);
+  el.hidden = false;
+  if (!s || (insetAt && s.pi === insetAt.pi && s.bi === insetAt.bi && s.fi === insetAt.fi)) return;
+  insetAt = s;
+  const f = data.spin.passes[s.pi].bands[s.bi].frames[s.fi];
+  const img = $('insetImg');
+  img.onload = () => drawOutlines($('insetOvl'), img, f.outlines, 1.5);
+  img.src = base + f.img;
+  $('insetCap').textContent = `이 방향의 실제 장면, ${data.spin.passes[s.pi].name === 'back' ? '뒷면 위 촬영' : '화면 위 촬영'} ${fmtTime(f.time_s)}`;
+}
+function drawOutlines(cv, img, outlines, lw) {
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * devicePixelRatio; cv.height = h * devicePixelRatio;
+  const ctx = cv.getContext('2d');
+  // object-fit: cover
+  const sc = Math.max(w / img.naturalWidth, h / img.naturalHeight);
+  const ox = (w - img.naturalWidth * sc) / 2, oy = (h - img.naturalHeight * sc) / 2;
+  ctx.setTransform(devicePixelRatio * sc, 0, 0, devicePixelRatio * sc, devicePixelRatio * ox, devicePixelRatio * oy);
+  ctx.clearRect(-ox / sc, -oy / sc, w / sc, h / sc);
+  ctx.lineWidth = lw / sc * 1.2;
+  ctx.strokeStyle = '#e5251e';
+  for (const o of outlines || []) for (const poly of o.polys) {
+    ctx.beginPath(); poly.forEach(([x, y], k) => (k ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath(); ctx.stroke();
+  }
+}
+$('inset').addEventListener('click', () => {
+  if (insetAt) { sp = { pass: insetAt.pi, band: insetAt.bi, idx: insetAt.fi }; spinFromInset = true; }
+  document.querySelector('.modes button[data-mode="spin"]').click();
+});
+let spinFromInset = false;
 
 // ------------------------------------------------------------------ 360 view of real keyframes
 let mode = 'model';
@@ -454,8 +666,31 @@ for (const b of document.querySelectorAll('.modes button')) {
     $('view3d').hidden = mode !== 'model';
     $('viewspin').hidden = mode !== 'spin';
     document.querySelector('.tools .seg').style.visibility = mode === 'model' ? '' : 'hidden';
-    if (mode === 'spin') { if (selected) jumpSpinTo(defects.find((d) => d.id === selected)); showSpin(); }
-    else resize();
+    for (const t of document.querySelectorAll('.tools .toggle')) t.style.visibility = mode === 'model' ? '' : 'hidden';
+    if (mode === 'spin') {
+      // start from the real frame taken where the 3D view looks from (or the selected defect's best frame)
+      if (spinFromInset) spinFromInset = false;
+      else if (selected) jumpSpinTo(defects.find((d) => d.id === selected));
+      else {
+        const s = nearestSpin(insetDir.copy(camera.position).sub(controls.target).normalize());
+        if (s) sp = { pass: s.pi, band: s.bi, idx: s.fi };
+      }
+      $('loupe').hidden = true;
+      showSpin();
+    } else {
+      resize();
+      // back in 3D: look from where the real frame was taken
+      const band = spinBand();
+      const f = band?.frames[(sp.idx + band.frames.length) % band.frames.length];
+      if (f) {
+        const az = f.az * Math.PI / 180, el = f.el * Math.PI / 180, sgn = spin[sp.pass].name === 'back' ? -1 : 1;
+        const dist = camera.position.distanceTo(controls.target);
+        const dir = new THREE.Vector3(Math.cos(el) * Math.cos(az), Math.cos(el) * Math.sin(az), sgn * Math.sin(el));
+        tween(controls.target.clone(), controls.target.clone().addScaledVector(dir, dist), true);
+      }
+      if (loupe.d) $('loupe').hidden = false;
+      insetAt = null;
+    }
   });
 }
 window.addEventListener('resize', drawSpinOverlay);

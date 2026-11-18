@@ -197,3 +197,64 @@ h3 { font-size: 15px; font-weight: 600; margin: 18px 0 8px; }
 @media (prefers-reduced-motion: reduce) {
   .pin { transition: none; }
 }
+
+/* plan F (2026-11-17): design-element legend swatch, zoom patch in the detail panel */
+.sw.blue { background: transparent; border: 2px solid #2878ff; }
+.detail .zoom { margin: 4px 0 14px; }
+.detail .zoom img { width: 100%; height: 200px; object-fit: cover; display: block; border-radius: 6px; background: #111; }
+.detail .zoom figcaption { font-size: 12px; color: var(--muted, #667); margin-top: 6px; line-height: 1.45; }
+
+/* ---------------------------------------------------------------- the loupe (2026-11-17)
+   Clicking a defect opens a jeweller's loupe beside its pin: the surface magnified from the
+   sharpest frame of the whole video (0.05 mm per pixel) and, next to it, the real frames it was
+   found in. A thin leader joins it to the pin. */
+.leader { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.leader line { stroke: var(--ink); stroke-width: 1.25; }
+.loupe { position: absolute; z-index: 6; width: 470px; max-width: calc(100% - 24px); background: var(--paper); color: var(--ink);
+  border: 1px solid rgba(29,33,37,0.18); border-radius: 14px; padding: 12px 14px 12px; box-shadow: 0 10px 30px rgba(29,33,37,0.18); }
+.loupe-title { margin: 0 64px 8px 0; font-weight: 600; font-size: 14px; line-height: 1.4; }
+.loupe-body { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 12px; align-items: start; }
+.lens { width: 190px; height: 190px; border-radius: 50%; overflow: hidden; border: 5px solid var(--ink); background: #222;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.35); }
+.lens img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.loupe-frame { margin: 0; }
+.loupe-frame .shot { display: block; padding: 0; border: 0; background: #222; border-radius: 8px; overflow: hidden; cursor: zoom-in; width: 100%; }
+.loupe-frame img { display: block; width: 100%; height: 150px; object-fit: cover; }
+.loupe-frame figcaption { font-size: 12.5px; color: var(--ink-2); margin-top: 6px; line-height: 1.45; }
+.loupe-steps { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 13px; }
+.loupe-steps button { border: 1px solid rgba(29,33,37,0.3); background: transparent; border-radius: 6px; padding: 2px 10px; cursor: pointer; }
+.loupe-steps button:hover { background: #fff; }
+.loupe-steps button[disabled] { opacity: 0.4; cursor: default; }
+.loupe-close { position: absolute; top: 9px; right: 10px; border: 0; background: transparent; font-size: 13px; color: var(--ink-2); cursor: pointer;
+  padding: 2px 6px; border-radius: 6px; }
+.loupe-close:hover { color: var(--ink); background: #fff; }
+
+/* the real frame taken from where the 3D view looks from, following the rotation */
+.inset { position: absolute; left: 14px; bottom: 14px; z-index: 5; width: 216px; padding: 0; border: 1px solid rgba(29,33,37,0.25);
+  border-radius: 10px; overflow: hidden; background: var(--paper); cursor: pointer; text-align: left; box-shadow: 0 6px 18px rgba(29,33,37,0.15); }
+.inset-img { position: relative; display: block; width: 216px; height: 162px; background: #222; }
+.inset-img img, .inset-img canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.inset-cap { display: block; font-size: 12px; padding: 5px 8px 6px; color: var(--ink-2); line-height: 1.35; }
+.inset:hover .inset-cap { color: var(--ink); }
+@media (max-width: 900px) {
+  /* on a phone the 3D stage is short: the loupe becomes a sheet along the bottom of the screen */
+  .loupe { position: fixed; left: 0 !important; right: 0; top: auto !important; bottom: 0; width: auto; max-width: none;
+    border-radius: 14px 14px 0 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); max-height: 46vh; overflow: auto; }
+  .loupe-title { font-size: 13px; margin-bottom: 6px; }
+  .loupe-body { grid-template-columns: 104px minmax(0, 1fr); gap: 10px; }
+  .lens { width: 104px; height: 104px; border-width: 4px; }
+  .loupe-frame img { height: 104px; }
+  .loupe-frame figcaption { font-size: 12px; }
+  .leader { display: none; }
+  .inset { width: 150px; }
+  .inset-img { width: 150px; height: 112px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .loupe:not([hidden]) { animation: loupe-in 160ms ease-out; }
+  @keyframes loupe-in { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: none; } }
+}
+@media (max-width: 600px) {
+  /* a phone: more room for the model, and the real-frame inset gives way to the mode switch */
+  .app { grid-template-rows: 82vh auto; }
+  .inset { display: none !important; }
+}

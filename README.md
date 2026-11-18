@@ -131,7 +131,7 @@ flawmap run --device iphone-12 \
     --out runs/iphone_demo                               # 하자 찾기와 뷰어 묶음 (runs/iphone_demo/bundle)
 bash scripts/fetch_web_vendor.sh                         # 뷰어용 three.js를 한 번 받아 둠 (인터넷 없이 시연)
 flawmap serve --port 8000                                # http://localhost:8000/?run=iphone_demo
-flawmap run --device auto --pass back=...                # 기종을 모를 때: 잰 크기로 추정, 맞는 도면이 없으면 판 모양 모델
+flawmap run --device auto --pass back=... --pass screen=...   # 기종을 모를 때: 바닥·배경 제약 없이 SAM 2로 기기를 찾고, 잰 크기로 추정 (맞는 도면이 없으면 판 모양 모델)
 flawmap run --device iphone-12 --poses boardless ...     # 보드가 찍혀 있어도 보드 없이 위치를 잼 (비교용)
 flawmap uco3d 59015-27660-21826 --face-up screen         # 공개 uCO3D 영상을 도면 없이 처리
 flawmap run --device auto --poses boardless --quality max --pass back=... --pass screen=...   # SAM 2 기기 마스크 + COLMAP 자세 보정 + 선명한 장면 우선 (느림)
@@ -147,6 +147,7 @@ flawmap board --board configs/board_a2.yaml --size 281.6 215.5 14   # 태블릿�
 python -m flawmap.synth.render_capture data/synthetic/demo_back --face-up back --seed 11          # 166장, 하자 7개 + 찍힘
 python -m flawmap.synth.render_capture data/synthetic/dents --face-up back --preset dents --seed 21   # 찍힘 2개만, 50장
 python -m flawmap.synth.render_capture data/synthetic/wood_back --face-up back --preset small --background wood --seed 11   # 보드 없이 나무 바닥
+python -m flawmap.synth.render_capture data/synthetic/g_dark --face-up back --preset small --background dark --design --shadow --seed 32   # 어두운 바닥, 로고·인쇄, 그림자 (바닥: wood|paper|cloth|dark|pattern)
 python -m flawmap.synth.evaluate runs/<이름> --pass back=data/synthetic/<촬영본>   # 정답과 비교: 카메라 위치, 찾은 하자
 ```
 
@@ -157,12 +158,18 @@ python -m flawmap.synth.evaluate runs/<이름> --pass back=data/synthetic/<촬�
 ```
 flawmap/
   anchor/     parametric.py  도면 치수 -> 원본 모델, 부위 라벨, 펼침 좌표, 보드 위 자세
-              register.py    실루엣과 영상 경계를 맞추는 정합
+              register.py    실루엣과 영상 경계(+ 기기 마스크)를 맞추는 정합
+              locate.py      보드 없이 기기 찾기: 바닥 평면, SAM 2 마스크, 발자국으로 판 크기
               template.py    도면이 없을 때 촬영본에 맞춘 판 모양 모델, 크기로 기종 추정
   poses/      board.py       인쇄 보드 생성과 보드로 카메라 위치, align.py ARKit 맞추기
               boardless.py   보드 없이: ARKit 흐름을 기기 외곽으로 바로잡음
+  segment/    device_masks.py  SAM 2 기기 마스크 (점·상자·마스크 프롬프트로 추적)
   surface/    raycast.py     원본 모델 레이캐스팅 (GPU: raycast_warp.py), maps.py 펼친 외관 지도와 커버리지
+  texture/    decompose.py   모든 프레임에서 표면색과 반사 나누기, allframes.py 텍셀별 유효 해상도
+  shape/      relief.py      높이 지도 시도 (재지 못하면 판 모델 유지), visual_hull.py 실루엣 형상
   detect/     appearance.py  프레임 까짐과 유리 선, outline.py 윤곽으로 찍힘
+              multiview.py   면의 다시점 검출: 표면선·점, 고정 번쩍임, 인쇄·부품·얼룩 분리
+              rarity.py      DINOv2 패치의 면 안 희소성 (보조 신호)
   evidence/   select.py      근거 장면 고르기와 빨간 윤곽 그림
   export/     bundle.py      뷰어 묶음 (glTF, 텍스처 아틀라스, defects.json)
   synth/      render_capture.py  정답이 있는 가상 촬영본, evaluate.py 정답과 비교
@@ -185,7 +192,7 @@ data/, runs/  생성물과 내려받은 데이터 (git 제외)
 ## 8. 테스트
 
 ```bash
-pytest          # 단위 테스트 52개, 약 1분 (작은 가상 촬영본을 끝까지 돌리는 시험, 서비스 흐름 시험 포함)
+pytest          # 단위 테스트 65개, 약 1분 (작은 가상 촬영본을 끝까지 돌리는 시험, 서비스 흐름 시험 포함)
 ```
 
 ## 9. 라이선스

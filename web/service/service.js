@@ -24,7 +24,7 @@ export function duration(s) {
   return s % 60 ? `${m}분 ${s % 60}초` : `${m}분`;
 }
 
-export const TYPE_KO = { chip: '프레임 까짐', dent: '프레임 찍힘', crack: '유리 깨짐', scratch: '흠집' };
+export const TYPE_KO = { chip: '프레임 까짐', dent: '프레임 찍힘', crack: '유리 깨짐', scratch: '흠집', spot: '점 자국', design: '설계·인쇄·얼룩(추정)' };
 export const PART_KO = { screen: '액정', back: '후면', frame: '프레임', camera: '카메라', lens: '카메라 렌즈', button: '버튼' };
 export const FACE_KO = { screen: '화면이 위로 온 촬영', back: '뒷면이 위로 온 촬영' };
 export const MODE_KO = {

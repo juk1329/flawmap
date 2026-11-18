@@ -33,8 +33,9 @@ from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
 from ..anchor.parametric import _resample_closed, outward_normals, rest_pose
-from ..anchor.register import _grad, _project, match_edges, register_device, silhouette_points
+from ..anchor.register import _grad, _project, mask_fields, mask_weight_for, match_edges, register_device, silhouette_points
 from ..geometry.camera import Camera
+from ..geometry.mesh_io import LabeledMesh
 from ..geometry.transforms import inv_T, make_T, rot_z, se3_exp
 from ..surface.raycast import RaycastScene
 from .align import CapturePoses
@@ -296,16 +297,30 @@ class JointFit:
     knots: np.ndarray                     # (K, 6) drift knots (rotation vector, displacement of the device centre)
     rounds: list = field(default_factory=list)
     per_view: dict = field(default_factory=dict)
+    scale: np.ndarray | None = None       # (width, length, thickness) factors of a plate fitted with the drift
 
 
 def joint_fit(model, face_up: str, frames: dict[int, np.ndarray], cams: dict[int, Camera], Tw: dict[int, np.ndarray],
               times: dict[int, float], T_init: np.ndarray, z_floor: float | None, views: list[int], knot_times: np.ndarray,
               knots_init: np.ndarray | None = None, searches=(12.0, 8.0, 5.0, 3.0, 2.5), huber_px: float = 1.0,
               max_points_per_view: int = 400, sigma_knot_deg=(0.5, 0.5, 3.0), sigma_knot_mm: float = 15.0,
-              sigma_floor_mm: float = 1.5, log=print) -> JointFit:
+              sigma_floor_mm: float = 1.5, masks: dict[int, np.ndarray] | None = None, mask_weight: float = 0.3,
+              mask_points_per_view: int = 150, fit_scale: bool = False, scale_init: np.ndarray | None = None,
+              thickness_sigma: float | None = None, log=print) -> JointFit:
     """Device heading/position (on the floor) and a piecewise-linear ARKit drift, from image edges.
     ``knot_times`` are fixed for the whole recording so that fits on growing time windows can hand
-    their knots on (``knots_init``)."""
+    their knots on (``knots_init``). ``masks``: device masks for the mask term (``anchor.register``).
+
+    ``fit_scale`` (plate models, no drawing): the plate's width, length and thickness factors are
+    fitted too, the floor prior following the thickness (the centre stays half a thickness above the
+    floor). Cameras moved along their axes towards the device look exactly like a larger device, and
+    the drift (15 mm per knot, weakly held) can do that; without the factors the drift took up the
+    error of the starting plate and the size fit kept it (synthetic iPhone 12 from a plate 4 mm too
+    long: 148.4 x 73.5 mm, 2026-11-17). With them a size error costs nothing in the prior, and the
+    drift keeps to what the data needs. The thickness has its own factor because a plate too thick
+    shows its side walls further out, which the length and width would otherwise make up for.
+    ``thickness_sigma`` holds that factor at its start (log scale) for a pass whose top face had no
+    texture to measure: over the iPad's black screen it fell to a 3.1 mm tablet (Apple 5.1)."""
     R0 = rest_pose(model, face_up)
     # the device: heading (deg, about the world z axis) and position offsets; its tilt stays the resting
     # tilt of ``rest_pose`` (it lies on the floor, and ARKit's gravity is the world z axis)
@@ -326,17 +341,26 @@ def joint_fit(model, face_up: str, frames: dict[int, np.ndarray], cams: dict[int
         w_knot[i] = (k0, x - k0)
     scene = RaycastScene(model.mesh, None)
     grads = {i: _grad(frames[i]) for i in views}
+    fields = mask_fields(masks, cams, views)
     sr = np.radians(np.asarray(sigma_knot_deg, float))
     zf_target = None if z_floor is None else T_init[2, 3]
-    q = np.zeros(4 + 6 * (n_knots - 1))
+    ns = 3 if fit_scale else 0
+    half_T = float(model.spec.thickness) / 2
+    q = np.zeros(4 + 6 * (n_knots - 1) + ns)
     if knots_init is not None:
-        q[4:] = np.asarray(knots_init)[1:].ravel()
+        q[4:4 + 6 * (n_knots - 1)] = np.asarray(knots_init)[1:].ravel()
+    if fit_scale and scale_init is not None:
+        q[-3:] = np.log(np.asarray(scale_init, float))
     rng = np.random.default_rng(0)
     fit = JointFit(T_dev(q[:4]), {}, np.zeros((n_knots, 6)))
 
     def unpack(q):
-        knots = np.vstack([np.zeros(6), q[4:].reshape(n_knots - 1, 6)])
+        knots = np.vstack([np.zeros(6), q[4:4 + 6 * (n_knots - 1)].reshape(n_knots - 1, 6)])
         return T_dev(q[:4]), knots
+
+    def scale_of(q):
+        """CAD-axis factors (x = width, y = length, z = thickness)."""
+        return np.exp(q[-3:]) if fit_scale else np.ones(3)
 
     def drift_of(i, knots, c):
         k0, a = w_knot[i]
@@ -345,49 +369,74 @@ def joint_fit(model, face_up: str, frames: dict[int, np.ndarray], cams: dict[int
     for rnd, S in enumerate(searches):
         T_wcad, knots = unpack(q)
         c = T_wcad[:3, 3]
-        data = []
+        data, mdata = [], []
+        wm = mask_weight_for(S, mask_weight) if fields else 0.0
+        s_now = scale_of(q)
+        if fit_scale:
+            # silhouettes of the plate at its current size; the points are kept in unit-plate coordinates
+            scene = RaycastScene(LabeledMesh(model.mesh.vertices * s_now, model.mesh.faces, model.mesh.face_label), None)
         for i in views:
             Twc = drift_of(i, knots, c) @ Tw[i]
             X, n2 = silhouette_points(scene, cams[i], inv_T(T_wcad) @ Twc)
             if len(X) == 0:
                 continue
+            X = X / s_now
             if len(X) > max_points_per_view:
                 sel = rng.choice(len(X), max_points_per_view, replace=False)
                 X, n2 = X[sel], n2[sel]
-            p, _ = _project(cams[i], inv_T(Twc), X @ T_wcad[:3, :3].T + T_wcad[:3, 3])
+            p, _ = _project(cams[i], inv_T(Twc), (X * s_now) @ T_wcad[:3, :3].T + T_wcad[:3, 3])
             tgt, _ = match_edges(*grads[i], p, n2, S)
             ok = np.isfinite(tgt[:, 0])
             if ok.sum() >= 20:
                 data.append((i, X[ok], n2[ok], tgt[ok]))
+            if wm > 0 and i in fields:
+                _, inb = fields[i](p)
+                Xm = X[inb]
+                if len(Xm) > mask_points_per_view:
+                    Xm = Xm[rng.choice(len(Xm), mask_points_per_view, replace=False)]
+                if len(Xm):
+                    mdata.append((i, Xm))
         if not data:
             break
 
         def residuals(qq):
             T_wcad_, knots_ = unpack(qq)
+            sc = scale_of(qq)
             c_ = T_wcad_[:3, 3]
             out = []
             for i, X, n2, tgt in data:
                 Twc = drift_of(i, knots_, c_) @ Tw[i]
-                p, _ = _project(cams[i], inv_T(Twc), X @ T_wcad_[:3, :3].T + T_wcad_[:3, 3])
+                p, _ = _project(cams[i], inv_T(Twc), (X * sc) @ T_wcad_[:3, :3].T + T_wcad_[:3, 3])
                 out.append(np.einsum("ij,ij->i", p - tgt, n2))
+            for i, Xm in mdata:
+                Twc = drift_of(i, knots_, c_) @ Tw[i]
+                p, _ = _project(cams[i], inv_T(Twc), (Xm * sc) @ T_wcad_[:3, :3].T + T_wcad_[:3, 3])
+                out.append(wm * fields[i](p)[0])
             pri = [knots_[1:, :3].ravel() / np.tile(sr, n_knots - 1), knots_[1:, 3:].ravel() / sigma_knot_mm]
             if zf_target is not None:
-                pri.append(np.array([(T_wcad_[2, 3] - zf_target) / sigma_floor_mm]))
+                pri.append(np.array([(T_wcad_[2, 3] - zf_target - (sc[2] - 1.0) * half_T) / sigma_floor_mm]))
+            if fit_scale and thickness_sigma:
+                pri.append(np.array([qq[-1] / thickness_sigma]))
             return np.concatenate(out + pri)
 
         n_data = sum(len(d[1]) for d in data)
         r0 = residuals(q)[:n_data]
         sol = least_squares(residuals, q, loss="huber", f_scale=huber_px, max_nfev=30,
-                            x_scale=np.r_[0.05, 0.2, 0.2, 0.2, np.tile(np.r_[1e-3, 1e-3, 1e-3, 0.2, 0.2, 0.2], n_knots - 1)])
+                            x_scale=np.r_[0.05, 0.2, 0.2, 0.2, np.tile(np.r_[1e-3, 1e-3, 1e-3, 0.2, 0.2, 0.2], n_knots - 1),
+                                          np.full(ns, 3e-3)])
         q = sol.x
         r1 = residuals(q)[:n_data]
         info = {"round": rnd, "search_px": S, "n_points": int(n_data), "n_views": len(data),
                 "median_abs_px_before": float(np.median(np.abs(r0))), "median_abs_px_after": float(np.median(np.abs(r1)))}
         fit.rounds.append(info)
+        if fit_scale:
+            info["scale"] = [round(float(x), 4) for x in scale_of(q)]
         log(f"  boardless joint fit round {rnd}: {len(data)} views, {n_data} edge points, |r| median "
-            f"{info['median_abs_px_before']:.2f} -> {info['median_abs_px_after']:.2f} px")
+            f"{info['median_abs_px_before']:.2f} -> {info['median_abs_px_after']:.2f} px"
+            + (f", plate x {info['scale'][1]:.4f} long, x {info['scale'][0]:.4f} wide, x {info['scale'][2]:.3f} thick" if fit_scale else ""))
     T_wcad, knots = unpack(q)
     fit.T_world_cad, fit.knots = T_wcad, knots
+    fit.scale = scale_of(q) if fit_scale else None
     c = T_wcad[:3, 3]
     for i in times:   # every frame, also those not used as views
         x = np.interp(times[i], kt, np.arange(n_knots))
@@ -399,10 +448,14 @@ def joint_fit(model, face_up: str, frames: dict[int, np.ndarray], cams: dict[int
 
 def boardless_poses(cap, frames: dict[int, np.ndarray], cams: dict[int, Camera], model, face_up: str,
                     n_search_views: int = 12, early_share: float = 0.3, n_fit_views: int = 48, polish: bool = False,
-                    min_lens_contrast: float = 15.0, plate=None, log=print) -> BoardlessResult:
+                    min_lens_contrast: float = 15.0, plate=None, masks: dict[int, np.ndarray] | None = None,
+                    z_floor: float | None = None, fit_plate: bool = False, log=print) -> BoardlessResult:
     """Camera poses (mm, a z-up world tied to the first part of the recording) for ``frames``.
     ``plate`` (``anchor.floor_outline.FloorPlate``) adds the device's measured pose on the floor to the
-    candidates; for a fitted plate model (no drawing) it is measured here when not given."""
+    candidates; for a fitted plate model (no drawing) it is measured here when not given.
+    ``masks`` (SAM 2, ``anchor.locate``) add the mask term to the joint fit; ``z_floor`` replaces the
+    LiDAR floor (``anchor.locate.refine_floor`` measures it from the images: the LiDAR plane lay
+    5-6.5 mm too low on the iPad recordings)."""
     ids = sorted(frames)
     Tw = {i: T_W_ARK @ cap.T_ark_cam[i] for i in ids}
     times = {i: float(cap.timestamps[i] - cap.timestamps[0]) for i in ids}
@@ -412,8 +465,12 @@ def boardless_poses(cap, frames: dict[int, np.ndarray], cams: dict[int, Camera],
     # later frames carry ARKit's drift (3.3 mm too high on the synthetic wood capture when all were used)
     n_early = max(n_search_views, int(round(len(ids) * early_share)))
     early = ids[:n_early]
-    zf = floor_height(cap, early[:: max(1, len(early) // 8)], Tw, centre)
-    info["floor_from"] = "lidar" if zf is not None else "axes"
+    if z_floor is not None:
+        zf = float(z_floor)
+        info["floor_from"] = "images"
+    else:
+        zf = floor_height(cap, early[:: max(1, len(early) // 8)], Tw, centre)
+        info["floor_from"] = "lidar" if zf is not None else "axes"
     z_search = zf if zf is not None else float(centre[2] - model.spec.thickness)
     info["floor_z"] = z_search
     log(f"  boardless: optical axes meet at {np.round(centre, 1)} mm; floor z {z_search:.1f} mm ({info['floor_from']})")
@@ -436,6 +493,12 @@ def boardless_poses(cap, frames: dict[int, np.ndarray], cams: dict[int, Camera],
             info["floor_plate"] = plate.info
     fit_views = [ids[int(k)] for k in np.linspace(0, len(ids) - 1, min(n_fit_views, len(ids))).round()]
     n_knots = int(np.clip(round(len(ids) / 30), 3, 6))
+    fit_scale = bool(fit_plate and model.spec.raw.get("template"))
+    # the thickness is left free only where the top face's own height was measured (texture on it).
+    # Elsewhere it is held: over the iPad's black screen the strongest edge all round is the glass
+    # outline, which a plate without thickness explains best; a 2 % prior lost to 18,000 edge points
+    # (0.43 mm, 2026-11-17)
+    t_sigma = None if (plate is not None and plate.top_height is not None and not plate.info.get("top_shared")) else 1e-3
     t_lo, t_hi = min(times.values()), max(times.values())
     kt = np.linspace(t_lo, t_hi, n_knots)
 
@@ -445,7 +508,8 @@ def boardless_poses(cap, frames: dict[int, np.ndarray], cams: dict[int, Camera],
     # the candidates (both 180-degree twins of the two best headings): short fits on the early part
     trials = []
     for T0 in cands:
-        f = joint_fit(model, face_up, frames, cams, Tw, times, T0, zf, window(0.4), kt, searches=(12.0, 6.0), log=lambda m: None)
+        f = joint_fit(model, face_up, frames, cams, Tw, times, T0, zf, window(0.4), kt, searches=(12.0, 6.0), masks=masks,
+                      fit_scale=fit_scale, thickness_sigma=t_sigma, log=lambda m: None)
         trials.append((f.rounds[-1]["median_abs_px_after"] if f.rounds else np.inf, f))
     from ..anchor.parametric import PARTS
 
@@ -483,7 +547,8 @@ def boardless_poses(cap, frames: dict[int, np.ndarray], cams: dict[int, Camera],
         cover = max(1, min(last, n_knots - 1))
         kn[cover + 1:] = kn[cover]
         fit = joint_fit(model, face_up, frames, cams, Tw, times, fit.T_world_cad, zf, vs, kt, knots_init=kn,
-                        searches=(10.0, 6.0, 4.0) if frac < 1.0 else (6.0, 4.0, 3.0, 2.5), log=log)
+                        searches=(10.0, 6.0, 4.0) if frac < 1.0 else (6.0, 4.0, 3.0, 2.5), masks=masks,
+                        fit_scale=fit_scale, scale_init=fit.scale, thickness_sigma=t_sigma, log=log)
     final = {i: fit.drift[i] @ Tw[i] for i in ids}
     if polish:
         # optional last step: each frame on its own, a few pixels from the joint fit and pulled to it.
@@ -505,7 +570,8 @@ def boardless_poses(cap, frames: dict[int, np.ndarray], cams: dict[int, Camera],
     info.update({"n_frames": len(ids), "n_knots": n_knots, "rounds": fit.rounds,
                  "drift_mm_max": float(np.linalg.norm(dv[:, 3:], axis=1).max()),
                  "drift_deg_max": float(np.degrees(np.linalg.norm(dv[:, :3], axis=1)).max()),
-                 "median_px": fit.rounds[-1]["median_abs_px_after"] if fit.rounds else None})
+                 "median_px": fit.rounds[-1]["median_abs_px_after"] if fit.rounds else None,
+                 "plate_scale": None if fit.scale is None else [round(float(x), 5) for x in fit.scale]})
     log(f"  boardless: ARKit drift up to {info['drift_mm_max']:.1f} mm / {info['drift_deg_max']:.2f} deg, "
         f"outline residual {info['median_px']:.2f} px")
     poses = CapturePoses(ids, final, {i: "model" for i in ids}, {}, T_W_ARK, {"mode": "boardless", **info})

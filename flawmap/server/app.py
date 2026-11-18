@@ -402,14 +402,23 @@ def create_app(runs_dir: Path, data_dir: Path | None = None, start_worker: bool 
 
 
 def seed_demo(store, runs_dir: Path, names: dict[str, dict]) -> list[str]:
-    """Register already processed runs (``runs/<name>``) as shared, listed example results, once."""
+    """Register already processed runs (``runs/<name>``) as shared, listed example results, once;
+    an example whose run was processed again since (newer ``run.json``) gets its summary, title and
+    device refreshed."""
     from ..service.job import summarize
 
-    have = {Path(d["run_dir"]).resolve() for d in store.list(limit=1000)}
+    have = {Path(d["run_dir"]).resolve(): d for d in store.list(limit=1000) if d.get("run_dir")}
     added = []
     for name, meta in names.items():
         rd = (Path(runs_dir) / name).resolve()
-        if rd in have or not (rd / "bundle" / "defects.json").exists() or not (rd / "run.json").exists():
+        if not (rd / "bundle" / "defects.json").exists() or not (rd / "run.json").exists():
+            continue
+        if rd in have:
+            d = have[rd]
+            if d.get("source") == "demo" and (rd / "run.json").stat().st_mtime > float(d.get("finished") or 0):
+                s = summarize(rd)
+                store.update(d["id"], summary=s, finished=time.time(), title=meta.get("title", name), device=meta.get("device", "iphone-12"),
+                             n_passes=len(json.loads((rd / "run.json").read_text()).get("passes", [])))
             continue
         d = store.create(device=meta.get("device", "iphone-12"), title=meta.get("title", name), seller=meta.get("requester", ""),
                          source="demo", status="done", run_dir=str(rd), published=True, listed=True)
@@ -427,6 +436,8 @@ DEMO_RESULTS = {   # seeded in this order; the gallery shows the newest first
                                 "requester": "공개 데이터"},
     "uco3d_2712-37354-8763": {"device": "template", "title": "청록 테두리 휴대폰, 액정 금 (공개 영상 uCO3D 2712-37354-8763, CC BY 4.0)",
                               "requester": "공개 데이터"},
+    "real_ipad": {"device": "template", "title": "아이패드 프로 13\" 은색, 두 면 (팀 실제 촬영, 나무 바닥, 보드·도면 없음)",
+                  "requester": "팀 촬영"},
 }
 
 

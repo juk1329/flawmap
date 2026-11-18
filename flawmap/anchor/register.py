@@ -14,6 +14,13 @@ This is model-based edge tracking. IoU of masks was the first plan, but it is fl
 and SAM 2 masks are 256x256 internally (1-1.5 mm per mask pixel on a 1920x1440 frame).
 Per-view residuals (px and mm) are kept: they measure registration quality and, along the frame,
 are the raw signal for outline-changing dents.
+
+**Mask term** (2026-11-17): with device masks (``anchor.locate``), every silhouette point also gets
+a residual equal to its signed distance to the mask's boundary (``MaskField``), weighted by
+``mask_weight * min(1, search / 6 px)``. The edges keep the sub-pixel precision; the masks keep the
+outline off the wrong lines (floor-board seams pulled a COLMAP re-registration of the iPad screen
+pass 1 cm off, mask IoU 0.879 against 0.984). Wide search windows get the full weight, the last
+3 px rounds about half of it.
 """
 from __future__ import annotations
 
@@ -144,18 +151,53 @@ def match_edges(gx: np.ndarray, gy: np.ndarray, p: np.ndarray, n2: np.ndarray, s
     return tgt, peak
 
 
+class MaskField:
+    """Signed distance to the boundary of a device mask, in full-frame pixels: negative inside,
+    positive outside, zero on the boundary (half way between the last inside and first outside
+    mask pixel). Points within 2 mask pixels of the image border get no residual: the mask's edge
+    there is the image's, not the device's."""
+
+    def __init__(self, mask: np.ndarray, frame_w: int, frame_h: int):
+        m = (np.asarray(mask) > 0).astype(np.uint8)
+        din = cv2.distanceTransform(m, cv2.DIST_L2, 5)
+        dout = cv2.distanceTransform(1 - m, cv2.DIST_L2, 5)
+        self.sd = (dout - din).astype(np.float32)
+        self.h, self.w = m.shape
+        self.sx, self.sy = self.w / frame_w, self.h / frame_h
+
+    def __call__(self, p: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        x = (p[:, 0] + 0.5) * self.sx - 0.5
+        y = (p[:, 1] + 0.5) * self.sy - 0.5
+        ok = (x > 2) & (y > 2) & (x < self.w - 3) & (y < self.h - 3)
+        return _bilinear(self.sd, x, y) / self.sx, ok
+
+
+def mask_fields(masks: dict[int, np.ndarray] | None, cams: dict[int, Camera], views) -> dict[int, MaskField]:
+    if not masks:
+        return {}
+    return {i: MaskField(masks[i], cams[i].width, cams[i].height) for i in views if i in masks}
+
+
+def mask_weight_for(search: float, weight: float) -> float:
+    return float(weight * min(1.0, search / 6.0))
+
+
 def register_device(model: DeviceModel, frames: dict[int, np.ndarray], cams: dict[int, Camera],
                     T_world_cam: dict[int, np.ndarray], T_init: np.ndarray, views: list[int] | None = None,
                     searches: tuple[float, ...] = (12.0, 6.0, 4.0, 3.0, 3.0), huber_px: float = 1.0,
-                    max_points_per_view: int = 600, log=print) -> Registration:
+                    max_points_per_view: int = 600, masks: dict[int, np.ndarray] | None = None, mask_weight: float = 0.3,
+                    mask_points_per_view: int = 200, log=print) -> Registration:
+    """``masks``: device masks per frame (any size) for the mask term (module docstring)."""
     scene = RaycastScene(model.mesh, None)
     views = views or sorted(frames)
     grads = {i: _grad(frames[i]) for i in views}
+    fields = mask_fields(masks, cams, views)
     T = T_init.copy()
     reg = Registration(T)
     rng = np.random.default_rng(0)
     for rnd, S in enumerate(searches):
-        data = []
+        data, mdata = [], []
+        wm = mask_weight_for(S, mask_weight) if fields else 0.0
         for i in views:
             T_cad_cam = inv_T(T) @ T_world_cam[i]
             X, n2 = silhouette_points(scene, cams[i], T_cad_cam)
@@ -170,19 +212,30 @@ def register_device(model: DeviceModel, frames: dict[int, np.ndarray], cams: dic
             tgt, strength = match_edges(*grads[i], p, n2, S)
             ok = np.isfinite(tgt[:, 0])
             data.append((i, X[ok], n2[ok], tgt[ok], T_cam_world))
+            if wm > 0 and i in fields:
+                _, inb = fields[i](p)
+                Xm = X[inb]
+                if len(Xm) > mask_points_per_view:
+                    Xm = Xm[rng.choice(len(Xm), mask_points_per_view, replace=False)]
+                if len(Xm):
+                    mdata.append((i, Xm, T_cam_world))
         if not data:
             break
 
-        def residuals(xi):
+        def residuals(xi, with_mask=True):
             Tn = se3_exp(xi) @ T
             out = []
             for i, X, n2, tgt, Tcw in data:
                 Xw = X @ Tn[:3, :3].T + Tn[:3, 3]
                 p, _ = _project(cams[i], Tcw, Xw)
                 out.append(np.einsum("ij,ij->i", p - tgt, n2))
+            if with_mask:
+                for i, Xm, Tcw in mdata:
+                    p, _ = _project(cams[i], Tcw, Xm @ Tn[:3, :3].T + Tn[:3, 3])
+                    out.append(wm * fields[i](p)[0])
             return np.concatenate(out)
 
-        r0 = residuals(np.zeros(6))
+        r0 = residuals(np.zeros(6), with_mask=False)
         # rotate about the device centre, not the board origin: express the update at the device
         c = T[:3, 3].copy()
 
@@ -195,13 +248,17 @@ def register_device(model: DeviceModel, frames: dict[int, np.ndarray], cams: dic
                             max_nfev=60)
         w, v = sol.x[:3], sol.x[3:]
         T = se3_exp(np.concatenate([w, v - np.cross(w, c)])) @ T
-        r1 = residuals(np.zeros(6))
+        r1 = residuals(np.zeros(6), with_mask=False)
         info = {"round": rnd, "search_px": S, "n_points": int(len(r0)), "median_abs_px_before": float(np.median(np.abs(r0))),
                 "median_abs_px_after": float(np.median(np.abs(r1))), "step_rot_deg": float(np.degrees(np.linalg.norm(w))),
                 "step_mm": float(np.linalg.norm(v))}
+        if mdata:
+            ms = np.concatenate([fields[i](_project(cams[i], Tcw, Xm @ T[:3, :3].T + T[:3, 3])[0])[0] for i, Xm, Tcw in mdata])
+            info.update(mask_weight=round(wm, 3), mask_points=int(len(ms)), mask_median_abs_px=round(float(np.median(np.abs(ms))), 2))
         reg.rounds.append(info)
         log(f"  register round {rnd}: {info['n_points']} edge points, |r| median {info['median_abs_px_before']:.2f} -> "
-            f"{info['median_abs_px_after']:.2f} px, step {info['step_mm']:.3f} mm / {info['step_rot_deg']:.3f} deg")
+            f"{info['median_abs_px_after']:.2f} px, step {info['step_mm']:.3f} mm / {info['step_rot_deg']:.3f} deg"
+            + (f"; mask {info['mask_median_abs_px']} px (w {info['mask_weight']})" if "mask_weight" in info else ""))
     # per-view quality with the final pose; the signed residuals (r > 0: the image edge lies inside
     # the model's silhouette, i.e. material is missing there) are kept for the outline channel
     for i, X, n2, tgt, Tcw in data:

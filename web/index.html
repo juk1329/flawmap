@@ -28,6 +28,27 @@
     <div class="view" id="view3d">
       <canvas id="c3d" aria-label="기기 3D 모델. 끌어서 돌리고, 빨간 번호를 누르면 하자를 봅니다."></canvas>
       <div class="pins" id="pins"></div>
+      <svg class="leader" id="leader" aria-hidden="true"><line id="leaderLine"/></svg>
+      <div class="loupe" id="loupe" hidden role="dialog" aria-labelledby="loupeTitle">
+        <p class="loupe-title" id="loupeTitle"></p>
+        <div class="loupe-body">
+          <div class="lens"><img id="loupeLens" alt=""></div>
+          <figure class="loupe-frame">
+            <button class="shot" id="loupeShot" aria-label="이 장면 크게 보기"><img id="loupeFrame" alt=""></button>
+            <figcaption id="loupeCap"></figcaption>
+            <div class="loupe-steps">
+              <button id="loupePrev" aria-label="이전 장면">이전</button>
+              <span id="loupeIdx"></span>
+              <button id="loupeNext" aria-label="다음 장면">다음</button>
+            </div>
+          </figure>
+        </div>
+        <button class="loupe-close" id="loupeClose" aria-label="확대 닫기">닫기</button>
+      </div>
+      <button class="inset" id="inset" hidden aria-label="이 방향에서 찍은 실제 장면 크게 보기">
+        <span class="inset-img"><img id="insetImg" alt=""><canvas id="insetOvl"></canvas></span>
+        <span class="inset-cap" id="insetCap">이 방향의 실제 장면</span>
+      </button>
       <p class="status" id="status3d">모델을 불러오는 중입니다.</p>
     </div>
 
@@ -36,7 +57,7 @@
         <img id="spinimg" alt="">
         <canvas id="spinovl"></canvas>
       </div>
-      <p class="hint">좌우로 끌면 기기 둘레를 돌고, 위아래로 끌면 찍은 높이가 바뀝니다. 빨간 윤곽을 누르면 그 하자를 봅니다.</p>
+      <p class="hint">좌우로 끌면 기기 둘레를 돌고, 위아래로 끌면 찍은 높이가 바뀝니다. 빨간 윤곽을 누르면 그 하자를 봅니다. 3D로 돌아가면 이 장면을 찍은 방향에서 모델을 봅니다.</p>
       <p class="spinmeta" id="spinmeta"></p>
       <div class="seg passes" id="spinPasses" role="group" aria-label="촬영"></div>
     </div>
@@ -47,9 +68,11 @@
         <button id="viewBack">뒷면</button>
         <button id="viewSide">옆면</button>
       </div>
-      <label class="toggle"><input type="checkbox" id="showDefects" checked> 하자 영역 칠하기</label>
+      <label class="toggle"><input type="checkbox" id="showDefects"> 하자 강조</label>
+      <label class="toggle" id="designToggle" hidden><input type="checkbox" id="showDesign"> 인쇄·부품·얼룩 보기</label>
       <div class="legend">
         <span><i class="sw red"></i>하자</span>
+        <span id="designLegend" hidden><i class="sw blue"></i>하자가 아닌 인쇄·부품·얼룩(추정)</span>
         <span><i class="sw hatch"></i>촬영되지 않아 확인하지 못한 곳</span>
       </div>
     </footer>
@@ -64,6 +87,10 @@
     </section>
     <section class="detail" id="detail" hidden>
       <h2 id="dTitle"></h2>
+      <figure class="zoom" id="dZoom" hidden>
+        <img id="dZoomImg" alt="">
+        <figcaption id="dZoomCap"></figcaption>
+      </figure>
       <dl class="facts-grid" id="dFacts"></dl>
       <h3>이 하자가 보이는 장면</h3>
       <div class="evidence" id="dEvidence"></div>

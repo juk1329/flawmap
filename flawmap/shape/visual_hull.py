@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     rep = json.loads((run / "run.json").read_text(encoding="utf-8"))
     if rep.get("device") == "template":
         est = rep["processing"]["device_estimate"]
-        model = build_device_model(template_spec(*est["size_mm"], est["corner_radius"]))
+        model = build_device_model(template_spec(*est["size_mm"], est["corner_radius"], edge_radius=est.get("edge_radius")))
     else:
         model = build_device_model(DeviceSpec.by_slug(rep["device"]))
     pj = json.loads((run / "passes" / name / "poses.json").read_text(encoding="utf-8"))

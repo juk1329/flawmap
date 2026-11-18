@@ -12,6 +12,7 @@ files=(
   examples/jsm/controls/OrbitControls.js
   examples/jsm/loaders/GLTFLoader.js
   examples/jsm/utils/BufferGeometryUtils.js
+  examples/jsm/environments/RoomEnvironment.js
 )
 for f in "${files[@]}"; do
   mkdir -p "$V/$(dirname "$f")"

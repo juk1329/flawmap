@@ -76,16 +76,83 @@ def hatch(h: int, w: int, period: int = 14, width: int = 2) -> np.ndarray:
     return ((xx + yy) % period) < width
 
 
+def chart_colour(cm: ChartMaps, chart: str, decomp: dict | None, albedo: dict | None = None) -> tuple[np.ndarray, np.ndarray | None]:
+    """Colour of every texel for the bundle: the shading-flattened surface colour of the
+    decomposition (``texture.decompose``) where it has samples, else the keyframe median; and the
+    reflection strength (mean excess lightness) where known. ``albedo``: chart images already
+    flattened (``albedo_images``)."""
+    rgb = np.nan_to_num(cm.stats["med_rgb"].astype(np.float32), nan=UNSEEN_RGB[0])
+    if not decomp or chart not in decomp:
+        return rgb, None
+    dec = decomp[chart]
+    g = cm.geom
+    got = dec.n_bins > 0
+    col = dec.diffuse.astype(np.float32)
+    if chart in ("screen", "back") and got.any():
+        alb = (albedo or {}).get(chart)
+        if alb is None:
+            alb = albedo_images(cm, {chart: dec})[chart]
+        col = alb.reshape(-1, 3)[g.flat_index].astype(np.float32)
+    return np.where(got[:, None], col, rgb), dec.spec_mean.astype(np.float32)
+
+
+def albedo_images(maps_or_cm, decomp: dict) -> dict[str, np.ndarray]:
+    """Shading-flattened surface colour (chart image, uint8 RGB) of every face chart with a decomposition."""
+    from ..texture.decompose import flatten_shading
+
+    out = {}
+    for c, dec in decomp.items():
+        if c not in ("screen", "back"):
+            continue
+        cm = maps_or_cm if isinstance(maps_or_cm, ChartMaps) else maps_or_cm.get(c)
+        if cm is None:
+            continue
+        g = cm.geom
+        got = dec.n_bins > 0
+        alb, _ = flatten_shading(g.to_image(dec.diffuse), g.valid & g.to_image(got, fill=False), g.res)
+        out[c] = alb
+    return out
+
+
+def _region_mask(cm: ChartMaps, chart: str, model: DeviceModel, texels: np.ndarray, grow: int = 2) -> np.ndarray:
+    x0, y0, res = atlas_layout(model)[chart]
+    uv = cm.geom.uv_of(texels)
+    px = np.stack([x0 + uv[:, 0] / res, y0 + uv[:, 1] / res], 1)
+    m = np.zeros((ATLAS_H, ATLAS_W), np.uint8)
+    q = np.round(px).astype(int)
+    m[np.clip(q[:, 1], 0, ATLAS_H - 1), np.clip(q[:, 0], 0, ATLAS_W - 1)] = 255
+    return cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=grow)
+
+
 def build_atlas(maps: dict[str, ChartMaps], model: DeviceModel, defects: list[dict], region_texels: dict,
-                good_views: int = 2) -> dict[str, np.ndarray]:
+                good_views: int = 2, decomp: dict | None = None, design: list | None = None,
+                albedo: dict | None = None) -> dict[str, np.ndarray]:
+    """Texture (surface colour), defect overlays, defect id map and, with a decomposition, the
+    reflection-strength map (``specular``: mean excess lightness x 8, 0-255) and a roughness map
+    (``roughness``: 0.9 - excess / 25, 0-255) of the atlas.
+
+    The defects are drawn twice: ``overlay`` only outlines them (a white halo and a red line), so the
+    real surface stays visible under them; ``overlay_fill`` also fills them (the highlighted view).
+    ``design``: [(chart, texels)] of the regions set aside as design, print or stains, outlined in
+    blue on ``design_overlay``."""
     tex = np.full((ATLAS_H, ATLAS_W, 3), 40, np.uint8)
     ovl = np.zeros((ATLAS_H, ATLAS_W, 4), np.uint8)
+    ovl_fill = np.zeros((ATLAS_H, ATLAS_W, 4), np.uint8)
+    dsg = np.zeros((ATLAS_H, ATLAS_W, 4), np.uint8)
     idm = np.zeros((ATLAS_H, ATLAS_W, 3), np.uint8)
+    spec = np.zeros((ATLAS_H, ATLAS_W), np.uint8)
+    rough = np.full((ATLAS_H, ATLAS_W), int(0.6 * 255), np.uint8)
     for c in CHARTS:
         cm = maps.get(c)
         fill = np.array(UNSEEN_RGB, np.float32)
         if cm is not None:
-            rgb = np.nan_to_num(cm.stats["med_rgb"].astype(np.float32), nan=UNSEEN_RGB[0])
+            rgb, sp = chart_colour(cm, c, decomp, albedo)
+            if sp is not None:
+                sp_img, (sx0, sy0, sW, sH) = _chart_to_atlas(cm, c, model, np.clip(sp * 8.0, 0, 255)[:, None], np.zeros(1, np.float32))
+                spec[sy0:sy0 + sH, sx0:sx0 + sW] = np.clip(sp_img.reshape(sH, sW), 0, 255).astype(np.uint8)
+                rg = np.clip(0.9 - sp / 25.0, 0.12, 0.9) * 255
+                rg_img, _ = _chart_to_atlas(cm, c, model, rg[:, None], np.zeros(1, np.float32))
+                rough[sy0:sy0 + sH, sx0:sx0 + sW] = np.clip(rg_img.reshape(sH, sW), 0, 255).astype(np.uint8)
             seen = (cm.stats["n_good"] >= good_views).astype(np.float32)
             img, (x0, y0, W, H) = _chart_to_atlas(cm, c, model, rgb, fill)
             seen_img, _ = _chart_to_atlas(cm, c, model, seen[:, None], np.zeros(1, np.float32), cv2.INTER_LINEAR)
@@ -103,20 +170,24 @@ def build_atlas(maps: dict[str, ChartMaps], model: DeviceModel, defects: list[di
     for d in defects:
         c = d["chart"]
         cm = maps[c]
-        x0, y0, res = atlas_layout(model)[c]
-        uv = cm.geom.uv_of(region_texels[d["id"]])
-        px = np.stack([x0 + uv[:, 0] / res, y0 + uv[:, 1] / res], 1)
-        m = np.zeros((ATLAS_H, ATLAS_W), np.uint8)
-        q = np.round(px).astype(int)
-        m[np.clip(q[:, 1], 0, ATLAS_H - 1), np.clip(q[:, 0], 0, ATLAS_W - 1)] = 255
-        m = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=2)
-        ovl[m > 0] = (235, 30, 30, 150)
-        cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        cv2.drawContours(ovl, cs, -1, (255, 0, 0, 255), 2)
+        m = _region_mask(cm, c, model, region_texels[d["id"]])
+        ring = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=3)
+        cs, _ = cv2.findContours(ring, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        cv2.drawContours(ovl, cs, -1, (255, 255, 255, 220), 4)
+        cv2.drawContours(ovl, cs, -1, (230, 30, 30, 255), 2)
+        ovl_fill[m > 0] = (235, 30, 30, 160)
+        cv2.drawContours(ovl_fill, cs, -1, (255, 0, 0, 255), 2)
         # generous pick area so a 1 mm chip is clickable
         mp = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=8)
         idm[mp > 0, 0] = d["id"]
-    return {"texture": tex, "overlay": ovl, "idmap": idm}
+    for c, texels in (design or []):
+        if c not in maps:
+            continue
+        m = _region_mask(maps[c], c, model, texels, grow=3)
+        cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        cv2.drawContours(dsg, cs, -1, (40, 120, 255, 230), 2)
+    return {"texture": tex, "overlay": ovl, "overlay_fill": ovl_fill, "design_overlay": dsg, "idmap": idm, "specular": spec,
+            "roughness": rough}
 
 
 def write_glb(model: DeviceModel, path: Path) -> None:
