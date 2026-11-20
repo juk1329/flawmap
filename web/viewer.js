@@ -17,7 +17,7 @@ function fmtTime(s) {
 }
 
 // Served by the inspection service, the page carries its configuration in window.FLAWMAP:
-// {bundle, role: owner|viewer, back, inspection, share_url, published, listed}.
+// {bundle, role: owner|viewer, back, inspection, share_url, published, listed, realistic, share_env}.
 const CFG = window.FLAWMAP || null;
 
 async function pickBundle() {
@@ -83,7 +83,7 @@ if (CFG?.inspection) {
     ...(pr.version ? [['프로그램 버전', pr.version]] : []),
   ];
   const who = CFG.role === 'owner'
-    ? `검수를 요청한 사람에게만 보이는 화면입니다. ${CFG.published ? (CFG.listed ? '링크로 공유하고 공개 목록에도 올렸습니다.' : '링크로 공유 중입니다.') : '아직 공유하지 않았습니다.'}`
+    ? `검수를 요청한 사람에게만 보이는 화면입니다. ${CFG.published ? (CFG.listed ? '링크로 공유하고 검수 결과 목록에도 올렸습니다.' : '링크로 공유 중입니다.') : '아직 공유하지 않았습니다.'}`
     : '요청자가 올린 촬영 영상을 검수 서버가 처리한 결과입니다. 요청자는 이 결과를 고칠 수 없습니다.';
   $('svc').hidden = false;
   $('svc').innerHTML =
@@ -91,7 +91,7 @@ if (CFG?.inspection) {
     `<p class="svc-who">${who}</p>` +
     (i.title ? `<p class="svc-title">${escHTML(i.title)}</p>` : '') +
     `<dl class="facts-grid">${rows.map(([k, v]) => `<dt>${escHTML(k)}</dt><dd>${escHTML(v)}</dd>`).join('')}</dl>` +
-    (CFG.back ? `<p class="svc-back"><a href="${escHTML(CFG.back)}">${CFG.role === 'owner' ? '내 검수 화면으로 돌아가기' : (CFG.back === '/gallery' ? '공개된 결과 목록으로' : 'flawmap 처음 화면으로')}</a></p>` : '');
+    (CFG.back ? `<p class="svc-back"><a href="${escHTML(CFG.back)}">${CFG.role === 'owner' ? '내 검수 화면으로 돌아가기' : (CFG.back === '/gallery' ? '검수 결과 목록으로' : 'flawmap 처음 화면으로')}</a></p>` : '');
 }
 
 const covOrder = ['screen', 'back', 'frame', 'camera', 'lens', 'button'];
@@ -178,6 +178,7 @@ function select(id, moveCamera) {
   for (const p of pinEls) p.el.classList.toggle('selected', p.d.id === id);
   const d = defects.find((x) => x.id === id);
   if (!d) return;
+  if (real.on) setReal(false);      // defects are judged on the inspection texture
   showDetail(d);
   openLoupe(d);
   if (moveCamera && mode === 'model') flyTo(d);
@@ -246,7 +247,17 @@ function playAt(pass, t) {
 }
 $('playerClose').addEventListener('click', () => { $('video').pause(); $('player').hidden = true; });
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape') { if (!$('modal').hidden) closeModal(); else closeLoupe(); }
+  // Escape peels one layer at a time: the enlarged frame, the help, the loupe, then the close-up itself
+  if (ev.key === 'Escape') {
+    if (!$('modal').hidden) closeModal();
+    else if (!$('howto').hidden) closeHowto();
+    else if (loupe.d && !$('loupe').hidden) closeLoupe();
+    else if (mode === 'model' && awayFromHome()) goHome();
+  }
+  if (mode === 'model' && $('modal').hidden && (ev.key === '0' || ev.key === 'Home') && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    ev.preventDefault();
+    goHome();
+  }
   if (mode === 'spin' && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) stepSpin(ev.key === 'ArrowRight' ? 1 : -1);
   if (mode === 'model' && loupe.d && !$('loupe').hidden && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) {
     (ev.key === 'ArrowRight' ? $('loupeNext') : $('loupePrev')).click();
@@ -274,6 +285,52 @@ scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa0a8, 0.7));
 const headlight = new THREE.DirectionalLight(0xffffff, 0.9);
 scene.add(headlight);
+
+// ------------------------------------------------------------------ the whole device and the way back to it
+// The model is centred on the origin: width along x, length along y, the screen facing +z. "Home" is the
+// whole device in the middle of the canvas, seen from the current direction at the distance that just fits
+// it. A defect close-up moves the orbit centre onto the defect; the home control, the 0 key, a double
+// click on empty space, or zooming back out (after a close-up) bring the whole device back.
+const DEV = { w: data.device.width_mm * 1e-3, l: data.device.length_mm * 1e-3, t: data.device.thickness_mm * 1e-3 };
+const CENTER = new THREE.Vector3(0, 0, 0);
+// the orbit centre may wander a little past the device, never so far that the device leaves the canvas
+const PIVOT_LIM = new THREE.Vector3(DEV.w * 0.6, DEV.l * 0.6, Math.max(DEV.t, 0.004));
+let pivot = 'home';   // 'home' | 'focus' (flown to a defect) | 'free' (moved by the person)
+const _right = new THREE.Vector3(), _up = new THREE.Vector3(), _corner = new THREE.Vector3();
+function viewDir() {
+  const d = camera.position.clone().sub(controls.target);
+  return d.lengthSq() > 1e-12 ? d.normalize() : new THREE.Vector3(0, -0.18, 1).normalize();
+}
+// the camera distance at which the whole device (its 8 box corners) fits the canvas from direction dir
+function fitDistance(dir) {
+  const fwd = dir.clone().normalize();
+  _right.crossVectors(camera.up, fwd);
+  if (_right.lengthSq() < 1e-8) _right.set(1, 0, 0);
+  _right.normalize();
+  _up.crossVectors(fwd, _right);
+  const tv = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const th = tv * camera.aspect;
+  let d = 0;
+  for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+    _corner.set(sx * DEV.w / 2, sy * DEV.l / 2, sz * DEV.t / 2);
+    const z = _corner.dot(fwd);
+    d = Math.max(d, z + Math.abs(_corner.dot(_right)) / th, z + Math.abs(_corner.dot(_up)) / tv);
+  }
+  return d * 1.12;   // a margin for the pins
+}
+// away = the centre has moved off the device centre, or part of the device is cut off, or it is tiny;
+// merely turning the device around at the home distance is not "away"
+function awayFromHome() {
+  const fd = fitDistance(viewDir());
+  const dist = camera.position.distanceTo(controls.target);
+  return controls.target.distanceTo(CENTER) > 0.03 * Math.max(DEV.l, DEV.w) || dist < 0.9 * fd || dist > 2.0 * fd;
+}
+function goHome(animate = true) {
+  const dir = viewDir();
+  pivot = 'home';
+  tween(CENTER.clone(), CENTER.clone().addScaledVector(dir, fitDistance(dir)), animate);
+}
+controls.maxDistance = Math.max(0.9, 2.2 * fitDistance(new THREE.Vector3(0, 0, 1)));
 
 const passes = data.capture.passes.map((p) => p.face_up);
 const startFace = passes.includes('back') && !passes.includes('screen') ? 'back' : 'screen';
@@ -322,6 +379,39 @@ if (designMesh) {
   $('showDesign').addEventListener('change', (e) => { designMesh.visible = e.target.checked; });
 }
 $('status3d').textContent = '';
+
+// ------------------------------------------------------------------ realistic view (bundle version 2)
+// C7 of the candidate comparison (flawmap/recon/service.py): the inspection model with the reflection
+// measured from each recording and its real frames blended near the directions they were taken from
+// (web/recon/mesh_hybrid.js). A way of looking at the device: defects are judged on the inspection
+// texture, so picking a defect switches back to it. A second face's layer is drawn over the first
+// one's model on its own face only. Through a shared link it is there only when the requester
+// allowed it (the reflections show the room the recording was made in).
+const real = { layers: [], on: false };
+function setReal(on) {
+  real.on = Boolean(on) && real.layers.length > 0;
+  for (const l of real.layers) l.mesh.visible = real.on;
+  mesh.visible = !real.on;
+  $('showReal').checked = real.on;
+}
+$('showReal').addEventListener('change', (e) => setReal(e.target.checked));
+async function loadRealistic() {
+  if (!data.realistic?.index || CFG?.realistic === false) return;
+  try {
+    const { realisticLayers } = await import('./recon/realistic.js');
+    real.layers = await realisticLayers(base, data, scene);
+  } catch (e) {
+    console.warn('realistic view not shown:', e);
+    real.layers = [];
+    // say so rather than fall back silently to the surface model
+    $('realToggle').hidden = false;
+    $('showReal').disabled = true;
+    $('realToggle').title = `실물처럼 보기를 불러오지 못했습니다: ${e?.message || e}`;
+  }
+  for (const l of real.layers) l.mesh.visible = false;
+  if (real.layers.length) { $('realToggle').hidden = false; setReal(selected == null); }
+}
+loadRealistic();
 
 // zoom patches: the finest frame of each face defect, resampled at 0.05 mm, laid on the surface and
 // shown when the camera comes close to it
@@ -401,23 +491,36 @@ const pinEls = defects.map((d) => {
 
 // click on the surface picks the defect painted there
 const ray = new THREE.Raycaster();
+function pickSurface(e) {
+  const r = canvas.getBoundingClientRect();
+  ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+  return ray.intersectObject(mesh, false)[0] || null;
+}
 let downAt = null;
 canvas.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
 canvas.addEventListener('pointerup', (e) => {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4) return;
-  const r = canvas.getBoundingClientRect();
-  ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
-  const hit = ray.intersectObject(mesh, false)[0];
+  const hit = pickSurface(e);
   if (hit && hit.uv) {
     const id = idAt(hit.uv);
     if (id > 0) select(id, false);
   }
 });
+// double click: on the device, that spot becomes the centre of the screen and of the rotation;
+// on empty space, the whole device comes back
+canvas.addEventListener('dblclick', (e) => {
+  const hit = pickSurface(e);
+  if (!hit) { goHome(); return; }
+  const delta = hit.point.clone().sub(controls.target);
+  pivot = 'free';
+  tween(hit.point.clone(), camera.position.clone().add(delta), true);
+});
 
 function setView(face, animate = true) {
   const dirs = { screen: [0.0, -0.18, 1], back: [0.0, -0.18, -1], side: [1, -0.25, 0.35] };
   const dir = new THREE.Vector3(...dirs[face]).normalize();
-  tween(new THREE.Vector3(0, 0, 0), dir.multiplyScalar(0.36 * viewScale), animate);
+  pivot = 'home';
+  tween(CENTER.clone(), dir.clone().multiplyScalar(fitDistance(dir)), animate);
 }
 $('viewFront').addEventListener('click', () => setView('screen'));
 $('viewBack').addEventListener('click', () => setView('back'));
@@ -428,8 +531,48 @@ function flyTo(d) {
   const n = new THREE.Vector3(...d.normal).normalize();
   // look at the defect from its normal, tilted a little so the frame band keeps some context
   const off = n.clone().multiplyScalar(0.16).add(new THREE.Vector3(0, -0.03, Math.sign(n.z || 1) * 0.03));
+  pivot = 'focus';
   tween(p, p.clone().add(off), true);
 }
+
+// the home control is quiet while the whole device is in view and turns solid once the view has moved;
+// the first time a close-up moves it away, a single ring shows where the way back is
+const homeBtn = $('homeView');
+let homeAway = false, homeNudged = false;
+homeBtn.addEventListener('click', () => goHome());
+function updateHomeButton() {
+  const away = awayFromHome();
+  if (away === homeAway) return;
+  homeAway = away;
+  homeBtn.classList.toggle('away', away);
+  if (away && pivot === 'focus' && !homeNudged) {
+    homeNudged = true;
+    homeBtn.classList.add('nudge');
+    setTimeout(() => homeBtn.classList.remove('nudge'), 1300);
+  }
+}
+
+// step through the defects without going back to the list (the camera flies to each)
+function stepDefect(k) {
+  if (!defects.length) return;
+  const i = defects.findIndex((d) => d.id === selected);
+  const j = i < 0 ? (k > 0 ? 0 : defects.length - 1) : (i + k + defects.length) % defects.length;
+  select(defects[j].id, true);
+}
+if (defects.length > 1) {
+  $('defectSteps').hidden = false;
+  $('prevDefect').addEventListener('click', () => stepDefect(-1));
+  $('nextDefect').addEventListener('click', () => stepDefect(1));
+}
+
+// how to move the model, on request
+function closeHowto() { $('howto').hidden = true; $('howtoBtn').setAttribute('aria-expanded', 'false'); }
+$('howtoBtn').addEventListener('click', () => {
+  const open = $('howto').hidden;
+  $('howto').hidden = !open;
+  $('howtoBtn').setAttribute('aria-expanded', String(open));
+});
+document.addEventListener('pointerdown', (e) => { if (!$('howto').hidden && !e.target.closest('.howto')) closeHowto(); });
 
 let anim = null;
 function tween(target, pos, animate) {
@@ -442,12 +585,27 @@ function tween(target, pos, animate) {
 const tmp = new THREE.Vector3();
 function resize() {
   const r = canvas.getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) return;
   renderer.setSize(r.width, r.height, false);
   camera.aspect = r.width / Math.max(r.height, 1);
   camera.updateProjectionMatrix();
+  // a new canvas shape needs a new fitting distance for the whole device
+  if (pivot === 'home' && !anim) goHome(false);
 }
 window.addEventListener('resize', resize);
 resize();
+
+const _pivotBefore = new THREE.Vector3(), _lo = PIVOT_LIM.clone().negate();
+let _lastDist = 0, _distSettled = 0;
+function keepPivotNearDevice() {
+  const t = controls.target;
+  const c = t.clone().clamp(_lo, PIVOT_LIM);
+  if (c.distanceToSquared(t) > 0) {
+    c.sub(t);
+    t.add(c);
+    camera.position.add(c);
+  }
+}
 
 function frame(now) {
   // the real-video view hides the 3D canvas: nothing to draw until it comes back
@@ -459,9 +617,19 @@ function frame(now) {
     camera.position.lerpVectors(anim.fromP, anim.toP, e);
     if (k >= 1) anim = null;
   }
+  _pivotBefore.copy(controls.target);
   controls.update();
+  // OrbitControls moves the orbit centre only when the person pans
+  if (!anim && _pivotBefore.distanceToSquared(controls.target) > 1e-12) pivot = 'free';
+  keepPivotNearDevice();
+  // after a close-up, zooming back out to about the whole-device distance re-centres the device
+  const dist = camera.position.distanceTo(controls.target);
+  if (Math.abs(dist - _lastDist) > 1e-5) { _lastDist = dist; _distSettled = now; }
+  if (!anim && pivot === 'focus' && now - _distSettled > 160 && dist > 0.85 * fitDistance(viewDir())) goHome();
+  updateHomeButton();
   headlight.position.copy(camera.position);
   updateZoomQuads();
+  if (real.on) for (const l of real.layers) l.update(camera);
   renderer.render(scene, camera);
   const r = canvas.getBoundingClientRect();
   for (const pin of pinEls) {
@@ -488,7 +656,8 @@ function placeLoupe(px, py, r, onScreen) {
   const right = px + gap + w < r.width - 12;
   let x = right ? px + gap : px - gap - w;
   x = Math.max(12, Math.min(r.width - w - 12, x));
-  let y = Math.max(12, Math.min(r.height - h - 12, py - h / 2));
+  // keep clear of the controls along the top of the canvas
+  let y = Math.max(58, Math.min(r.height - h - 12, py - h / 2));
   el.style.left = `${x}px`;
   el.style.top = `${y}px`;
   const lx = right ? x : x + w;

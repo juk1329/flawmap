@@ -16,7 +16,10 @@
   <div class="wrap">
     <div class="hero-copy">
       <h1>물건 둘레를 찍은 영상 하나로, 하자의 자리와 크기를 3D 모델 위에 짚어 드립니다.</h1>
-      <a class="btn big" href="/new">검수 요청하기</a>
+      <div class="actions">
+        <a class="btn big" href="/new">검수 요청하기</a>
+        <a class="btn big ghost" href="/gallery">검수 결과 보기</a>
+      </div>
     </div>
     <figure class="hero-model">
       <canvas id="heroCanvas" aria-label="실제 검수 결과의 3D 모델. 끌어서 돌려 볼 수 있습니다."></canvas>
@@ -30,7 +33,7 @@
     <ol class="steps">
       <li><h3>둘레를 찍습니다</h3><p class="muted">물건을 바닥에 놓고 낮은 각도, 중간, 위에서 한 바퀴씩 돌며 찍습니다. 보드 같은 준비물은 없어도 됩니다. 면마다 1분 정도입니다.</p></li>
       <li><h3>영상을 올립니다</h3><p class="muted">서버가 차례로 처리합니다. 진행 상황과 남은 시간이 요청한 사람의 화면에 보이고, 덜 찍힌 곳이 있으면 다시 찍을 곳을 알려 줍니다.</p></li>
-      <li><h3>결과를 나눕니다</h3><p class="muted">링크를 보내거나 공개 목록에 올립니다. 받은 사람은 같은 3D 결과와 근거 장면을 봅니다. 결과는 요청한 사람도 고칠 수 없습니다.</p></li>
+      <li><h3>결과를 나눕니다</h3><p class="muted">링크를 보내거나 검수 결과 목록에 올립니다. 받은 사람은 같은 3D 결과와 근거 장면을 봅니다. 결과는 요청한 사람도 고칠 수 없습니다.</p></li>
     </ol>
   </section>
 
@@ -79,9 +82,9 @@ try {
   const m = (data.design || []).length;
   $('heroCap').innerHTML = `${esc(pick.title)}. ${n ? `하자 후보 ${n}곳` : '찾은 하자 없음'}` +
     (m ? `, 하자가 아닌 인쇄·부품·얼룩 ${m}곳은 따로 표시했습니다.` : '.') +
-    ` <a href="${esc(pick.report_url)}">이 결과 열기</a>`;
+    ` <a class="btn ghost small" href="${esc(pick.report_url)}">이 결과 열기</a>`;
 } catch {
-  $('heroCap').textContent = '예시 결과를 불러오지 못했습니다. 공개된 결과 목록에서 볼 수 있습니다.';
+  $('heroCap').textContent = '예시 결과를 불러오지 못했습니다. 위의 "검수 결과 보기"에서 다른 결과를 열 수 있습니다.';
 }
 </script>
 </body>

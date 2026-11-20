@@ -26,8 +26,30 @@
     </header>
 
     <div class="view" id="view3d">
-      <canvas id="c3d" aria-label="기기 3D 모델. 끌어서 돌리고, 빨간 번호를 누르면 하자를 봅니다."></canvas>
+      <canvas id="c3d" aria-label="기기 3D 모델. 끌어서 돌리고, 빨간 번호를 누르면 하자를 봅니다. 기기 전체 보기 버튼이나 0 키로 기기 전체를 화면 가운데에 다시 놓습니다."></canvas>
       <div class="pins" id="pins"></div>
+      <div class="viewnav">
+        <button class="home-view" id="homeView" type="button" aria-keyshortcuts="0 Home" title="기기 전체 보기 (0 키, 빈 곳을 두 번 누르기)">
+          <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M2 6.5V2h4.5M13.5 2H18v4.5M18 13.5V18h-4.5M6.5 18H2v-4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="7.2" y="5" width="5.6" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+          <span class="hv-long">기기 전체 보기</span><span class="hv-short">전체 보기</span>
+        </button>
+        <div class="defect-steps" id="defectSteps" role="group" aria-label="하자를 차례로 보기" hidden>
+          <button type="button" id="prevDefect">이전 하자</button>
+          <button type="button" id="nextDefect">다음 하자</button>
+        </div>
+      </div>
+      <div class="howto">
+        <button class="howto-btn" id="howtoBtn" type="button" aria-expanded="false" aria-controls="howto">조작 방법</button>
+        <div class="howto-panel" id="howto" hidden>
+          <dl>
+            <div><dt>돌리기</dt><dd>끌기. 휴대폰은 한 손가락으로 끌기</dd></div>
+            <div><dt>옮기기</dt><dd>오른쪽 버튼이나 Shift를 누른 채 끌기. 휴대폰은 두 손가락으로 끌기</dd></div>
+            <div><dt>확대</dt><dd>휠. 휴대폰은 두 손가락 벌리기</dd></div>
+            <div><dt>그 자리를 가운데로</dt><dd>기기 위를 두 번 누르기</dd></div>
+            <div><dt>기기 전체 보기</dt><dd>버튼, 0 키, 빈 곳을 두 번 누르기. 하자를 본 뒤 멀리 빼도 기기가 가운데로 돌아옵니다</dd></div>
+          </dl>
+        </div>
+      </div>
       <svg class="leader" id="leader" aria-hidden="true"><line id="leaderLine"/></svg>
       <div class="loupe" id="loupe" hidden role="dialog" aria-labelledby="loupeTitle">
         <p class="loupe-title" id="loupeTitle"></p>
@@ -68,6 +90,7 @@
         <button id="viewBack">뒷면</button>
         <button id="viewSide">옆면</button>
       </div>
+      <label class="toggle" id="realToggle" hidden title="촬영 영상에서 잰 반사와 실제 프레임으로 그린 모습입니다. 하자를 고르면 표면만 보기로 바뀝니다."><input type="checkbox" id="showReal"> 실물처럼 보기</label>
       <label class="toggle"><input type="checkbox" id="showDefects"> 하자 강조</label>
       <label class="toggle" id="designToggle" hidden><input type="checkbox" id="showDesign"> 인쇄·부품·얼룩 보기</label>
       <div class="legend">

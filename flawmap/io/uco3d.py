@@ -19,6 +19,7 @@ timestamp, and the video frame is ``round(timestamp * fps)``.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -144,6 +145,24 @@ def read_points(seq: Uco3dSequence, segmented: bool = True) -> np.ndarray:
     p = PlyData.read(str(seq.root / ("segmented_point_cloud.ply" if segmented else "point_cloud.ply")))
     v = p.elements[0]
     return np.column_stack([v["x"], v["y"], v["z"]]).astype(np.float64)
+
+
+def read_splat_means(seq: Uco3dSequence) -> np.ndarray:
+    """The positions of the dataset's own Gaussian-splat fit of the sequence (``gaussian_splats/``,
+    the whole scene), in the SfM frame: two 8-bit PNGs (``means_u`` high byte, ``means_l`` low byte,
+    RGB = xyz) give 16 bits a coordinate over ``meta.json``'s range, stored as sign(x) log(1 + |x|).
+    The log decoding was checked on 2712-37354-8763: its segmented SfM points lie a median 0.009
+    units from the foreground splats decoded this way, 0.39 units decoded linearly. Used where the
+    full SfM point cloud was not downloaded (``point_cloud.ply``)."""
+    import cv2
+
+    d = seq.root / "gaussian_splats"
+    meta = json.loads((d / "meta.json").read_text())["means"]
+    lo = cv2.imread(str(d / "means_l.png"), cv2.IMREAD_UNCHANGED)[..., ::-1].reshape(-1, 3).astype(np.uint32)
+    hi = cv2.imread(str(d / "means_u.png"), cv2.IMREAD_UNCHANGED)[..., ::-1].reshape(-1, 3).astype(np.uint32)
+    mins, maxs = np.asarray(meta["mins"], np.float64), np.asarray(meta["maxs"], np.float64)
+    m = mins + ((hi << 8) | lo) / 65535.0 * (maxs - mins)
+    return (np.sign(m) * np.expm1(np.abs(m)))[: int(meta["shape"][0])]
 
 
 def mask_agreement(seq: Uco3dSequence, frame_numbers: list[int], max_points: int = 5000) -> float:

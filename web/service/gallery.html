@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>공개된 결과 | flawmap</title>
+<title>검수 결과 | flawmap</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/service/service.css">
 </head>
@@ -11,8 +11,8 @@
 <header class="top" id="top"></header>
 <main class="wrap">
   <section>
-    <h1>공개된 검수 결과</h1>
-    <p class="lead">요청자가 공개 목록에 올린 결과입니다. 검수 표를 누르면 3D 결과와 하자마다의 근거 장면을 봅니다. 링크로만 공유한 결과는 여기에 나오지 않습니다.</p>
+    <h1>검수 결과</h1>
+    <p class="lead">검수를 요청한 사람이 목록에 올린 결과입니다. 항목을 누르면 3D 모델 위에서 하자의 자리와 크기, 하자가 찍힌 실제 장면을 볼 수 있습니다. 링크로만 나눈 결과는 여기에 나오지 않습니다.</p>
   </section>
   <section>
     <ul class="listings" id="list"></ul>
@@ -22,17 +22,19 @@
 import { $, esc, getJSON, topbar, tagHTML, when } from '/service/service.js';
 $('top').innerHTML = topbar('/gallery');
 const list = await getJSON('/api/gallery');
-const SRC = { demo: '예시', public: '공개 영상', sample: '가상 촬영' };
+const SRC = { demo: '예시', public: '공개 데이터 영상', sample: '가상 촬영' };
 if (!list.length) {
-  $('list').outerHTML = `<div class="empty-state"><p><b>아직 공개된 결과가 없습니다.</b></p><p class="muted">검수를 요청하고 결과 화면에서 "공개 목록에도 올리기"를 켜면 여기에 나타납니다.</p><a class="btn" href="/new">검수 요청하기</a></div>`;
+  $('list').outerHTML = `<div class="empty-state"><p><b>아직 목록에 올라온 검수 결과가 없습니다.</b></p><p class="muted">검수를 요청하고 결과 화면에서 "검수 결과 목록에도 올리기"를 켜면 여기에 나타납니다.</p><a class="btn" href="/new">검수 요청하기</a></div>`;
 } else {
+  // the whole row opens the result; the tag summarises it and the last line says so in words
   $('list').innerHTML = list.map((x) =>
-    `<li class="listing">` +
-    (x.thumbnail ? `<img class="thumb" src="${esc(x.thumbnail)}" alt="${esc(x.title)} 촬영 장면" loading="lazy">` : `<span class="thumb" aria-hidden="true"></span>`) +
-    `<div><h3>${esc(x.title || x.device_name || '검수한 물건')}</h3>` +
+    `<li><a class="listing" href="${esc(x.report_url)}">` +
+    (x.thumbnail ? `<img class="thumb" src="${esc(x.thumbnail)}" alt="" loading="lazy">` : `<span class="thumb" aria-hidden="true"></span>`) +
+    `<div class="l-text"><h3>${esc(x.title || x.device_name || '검수한 물건')}</h3>` +
     `<p class="small muted">${esc(x.device_name || '')}${x.requester ? `, 요청자 ${esc(x.requester)}` : ''}${SRC[x.source] ? `, ${SRC[x.source]}` : ''}</p>` +
-    `<p class="small muted">${when(x.finished)} 검수</p></div>` +
-    tagHTML(x, { href: x.report_url }) + `</li>`).join('');
+    `<p class="small muted">${when(x.finished)} 검수</p>` +
+    `<span class="open-cta">3D 결과 열기</span></div>` +
+    tagHTML(x) + `</a></li>`).join('');
 }
 </script>
 </body>

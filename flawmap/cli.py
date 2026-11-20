@@ -38,12 +38,108 @@ def cmd_run(args: argparse.Namespace) -> int:
         face, _, path = spec.partition("=")
         if face not in ("screen", "back") or not path:
             raise SystemExit(f"--pass expects screen=PATH or back=PATH, got {spec!r}")
-        passes.append(PassInput(Path(path), face))
+        passes.append(PassInput(Path(path), face, placement=args.placement))
     out = Path(args.out or f"runs/{args.device}_{Path(passes[0].root).name}")
+    meta = {}
+    if args.holdout == "blocks":
+        # time blocks held out for judging models against real frames (eval.heldout); nothing learns from them
+        import json
+
+        from .eval.heldout import block_split
+        from .io.stray import read_stray
+
+        splits = {}
+        for p in passes:
+            sp = block_split(read_stray(p.root).timestamps)
+            p.exclude = sp.excluded
+            splits[p.name] = sp.to_json()
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "holdout.json").write_text(json.dumps(splits))
+        meta["holdout"] = {k: {"test": len(v["test"]), "val": len(v["val"]), "guard": len(v["guard"]), "train": v["train"]}
+                           for k, v in splits.items()}
     best = args.quality == "max"
     rep = run(passes, args.device, out, keyframes=args.keyframes, board_square_mm=args.square_mm, poses=args.poses,
-              board_path=args.board, refine="colmap" if best else None, sharp_views=best, segment=best)
+              board_path=args.board, refine="colmap" if best else None, sharp_views=best, segment=best, meta=meta)
     print(f"{len(rep['defects'])} defects, coverage {rep['coverage']['overall']:.1%}, {rep['timing_s']['total']:.0f}s -> {out / 'bundle'}")
+    if args.realistic:
+        _realistic(out)
+    return 0
+
+
+def _realistic(run_dir: Path, keep_work: bool = False) -> None:
+    from .recon.service import build_realistic
+
+    idx = build_realistic(run_dir, keep_work=keep_work)
+    for f in idx["faces"]:
+        print(f"realistic view of the {f['face']}: {f['seconds']:.0f} s, {f['web_mb']} MB -> {run_dir / 'bundle' / f['manifest']}")
+    for f in idx["failed"]:
+        print(f"realistic view of the {f['face']} failed: {f['error']}")
+
+
+def cmd_realistic(args: argparse.Namespace) -> int:
+    _realistic(Path(args.run), keep_work=args.keep_work)
+    return 0
+
+
+def cmd_realistic_backfill(args: argparse.Namespace) -> int:
+    """The realistic view for every finished result of the service that has none yet (results made
+    before it existed), one after another; the requester pages' summaries are refreshed."""
+    from .recon.service import build_realistic
+    from .service.job import summarize
+    from .service.store import Store
+
+    store = Store(Path(args.data))
+    rows = [d for d in store.list(status="done", limit=100000)
+            if (args.again or not (Path(d["run_dir"]) / "bundle" / "real" / "index.json").exists())
+            and (args.superseded or not d.get("superseded_by"))]
+    print(f"{len(rows)} results without the realistic view")
+    for d in rows:
+        rd = Path(d["run_dir"])
+        if not (rd / "run.json").exists():
+            continue
+        idx = build_realistic(rd)
+        store.update(d["id"], summary=summarize(rd))
+        print(f"{d['id']} {rd}: faces {[f['face'] for f in idx['faces']]}, failed {[f['face'] for f in idx['failed']]}, {idx['seconds']:.0f} s",
+              flush=True)
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    from .recon.runner import run_compare
+
+    idx = run_compare(args.base_run, [c.strip() for c in args.candidates.split(",") if c.strip()], args.out, refit=args.refit,
+                      stress=not args.no_stress, round_name=args.round, turn_only=args.turn_only)
+    for c in idx.get("candidates", []):
+        s = c["summary"]
+        print(f"{c['id']:4s} {c['label']}: held-out PSNR {s.get('psnr_g')} (gain fitted), LPIPS {s.get('lpips_g')}, "
+              f"floaters {s.get('turn30_float')}, holes under {s.get('under_hole')}, flicker {s.get('flicker')}, "
+              f"turn jump {s.get('turn_jump')}")
+    print(f"-> {Path(args.out) / idx['rec']} (open /compare.html?rec={idx['rec']} on the flawmap server)")
+    return 0
+
+
+def cmd_compare_sheet(args: argparse.Namespace) -> int:
+    from .recon.sheet import write_sheet
+
+    print(write_sheet(Path(args.out) / args.rec, frame=args.frame))
+    return 0
+
+
+def cmd_compare_blind(args: argparse.Namespace) -> int:
+    from .recon.blind import make_blind_pack
+
+    base = [c.strip() for c in args.cands.split(",") if c.strip()]
+    extra = {}
+    for e in args.extra:
+        rec, _, cs = e.partition("=")
+        extra[rec.strip()] = [c.strip() for c in cs.split(",") if c.strip()]
+    pack = Path(args.out) / args.pack
+    for k, rec in enumerate(args.recs):
+        cands = base + [c for c in extra.get(rec, []) if c not in base]
+        # every recording gets its own order, also with a fixed seed
+        make_blind_pack(Path(args.out) / rec, cands, pack, seed=None if args.seed is None else args.seed + k)
+        print(f"{rec}: {len(cands)} candidates under letters -> {pack / rec}")
+    print(f"which letter is which: {pack.with_name(pack.name + '.key.json')} (open only after rating)")
     return 0
 
 
@@ -118,7 +214,52 @@ def main(argv: list[str] | None = None) -> int:
                    help="max: SAM 2 device masks to check the registration and keep floor out of the texture, COLMAP "
                         "refinement of boardless poses, textures and detections from the sharpest views "
                         "(slower; needs torch, sam2 and pycolmap)")
+    r.add_argument("--placement", default="auto", choices=["auto", "flat"],
+                   help="auto: also handle a device standing on a stand or leaning (anchor.placement); flat: the floor-only path")
+    r.add_argument("--holdout", default="none", choices=["none", "blocks"],
+                   help="blocks: hold out 1-second time blocks (with guard bands) from everything that learns from frames, "
+                        "for judging models against real frames later (flawmap compare); written to <out>/holdout.json")
+    r.add_argument("--realistic", action="store_true",
+                   help="also build the realistic view (C7: measured reflection + real frames, flawmap.recon.service) into the bundle")
     r.set_defaults(func=cmd_run)
+
+    rl = sub.add_parser("realistic", help="add the realistic view (C7, flawmap.recon.service) to a finished run's bundle")
+    rl.add_argument("run", help="a finished `flawmap run` folder (runs/<name>)")
+    rl.add_argument("--keep-work", action="store_true", help="keep <run>/realistic (the fitted C1/C7 artifacts) after the export")
+    rl.set_defaults(func=cmd_realistic)
+
+    rb = sub.add_parser("realistic-backfill", help="add the realistic view to every finished service result that has none")
+    rb.add_argument("--data", default="data/service", help="the service's data folder")
+    rb.add_argument("--again", action="store_true", help="build it again where it exists")
+    rb.add_argument("--superseded", action="store_true", help="also results replaced by a newer one")
+    rb.set_defaults(func=cmd_realistic_backfill)
+
+    cp = sub.add_parser("compare", help="fit reconstruction candidates on one recording and score them side by side (recon)")
+    cp.add_argument("--base-run", required=True, help="a finished `flawmap run ... --holdout blocks` of one recording")
+    cp.add_argument("--candidates", default="c0,c2", help="comma-separated ids (recon.registry), e.g. c0,c2,c5a")
+    cp.add_argument("--out", default="runs/compare")
+    cp.add_argument("--refit", action="store_true", help="fit again even if the candidate's artifact exists")
+    cp.add_argument("--no-stress", action="store_true", help="skip the stress views (held-out frames only)")
+    cp.add_argument("--round", default="", help="label of this comparison round (stored with the scores)")
+    cp.add_argument("--turn-only", action="store_true",
+                    help="render and score only the turntable again (flicker, jumps), keeping the other scores")
+    cp.set_defaults(func=cmd_compare)
+
+    cs = sub.add_parser("compare-sheet", help="one picture per recording: every candidate's held-out render and stress views")
+    cs.add_argument("rec", help="recording id under runs/compare")
+    cs.add_argument("--out", default="runs/compare")
+    cs.add_argument("--frame", type=int, help="held-out frame to show (default: the median one)")
+    cs.set_defaults(func=cmd_compare_sheet)
+
+    cb = sub.add_parser("compare-blind", help="blind rating files: a set of candidates under shuffled letters (videos and pictures), "
+                                              "the letters kept in a separate key file")
+    cb.add_argument("recs", nargs="+", help="recording ids under runs/compare")
+    cb.add_argument("--cands", default="c0,c1,c2,c7,c4b", help="comma-separated candidate ids rated together")
+    cb.add_argument("--extra", action="append", default=[], metavar="REC=c5d,...", help="more candidates for one recording")
+    cb.add_argument("--pack", default="blind", help="folder under --out (and <pack>.key.json beside it)")
+    cb.add_argument("--out", default="runs/compare")
+    cb.add_argument("--seed", type=int, help="fixed shuffle (default: random; stored in the key file)")
+    cb.set_defaults(func=cmd_compare_blind)
 
     u = sub.add_parser("uco3d", help="process a public uCO3D phone video without a reference drawing (fitted plate model)")
     u.add_argument("name", help="sequence name, e.g. 59015-27660-21826")

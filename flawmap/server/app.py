@@ -15,16 +15,18 @@ Service (``data_dir`` given, the default for ``flawmap serve``):
     GET  /ops                       operator view of the queue (localhost only)
     POST /api/inspections           multipart: device, title, requester, screen/back zip | sample | public
     GET  /api/inspections/<owner>   status for the requester page
-    POST /api/inspections/<owner>/share     {"published": bool, "listed": bool}
+    POST /api/inspections/<owner>/share     {"published": bool, "listed": bool, "share_env": bool}
     DELETE /api/inspections/<owner>
     GET  /api/reports/<share>       summary of a shared result
     GET  /api/gallery               results on the public list
     GET  /api/samples               synthetic samples and public videos the form offers
-    GET  /{s|r}/<token>/bundle/...  result files, after checking the token
+    GET  /{s|r}/<token>/bundle/...  result files, after checking the token; the realistic view's files
+                                    (bundle/real/, the room shows in their reflections) through the
+                                    shared link only when the requester allowed it (share_env)
 
 ``/sell`` and ``/market`` (the first, used-phone-market wording) redirect to ``/new`` and ``/gallery``.
 
-Development (always on):
+Development (always on; with the service, the files under runs/ only from this machine):
 
     GET /?run=<name>, /viewer       viewer on runs/<name>/bundle
     GET /api/bundles                bundles under runs/
@@ -115,6 +117,14 @@ def _viewer_html(config: dict | None = None) -> HTMLResponse:
     return HTMLResponse(html.replace("<head>", "<head>\n" + inject, 1))
 
 
+def _realistic_file(base: Path, rel: str) -> bool:
+    """``rel`` (as the file route resolves it under ``base``) is a file of the realistic view
+    (``recon.service``: ``bundle/real/``)."""
+    real = (Path(base) / "real").resolve()
+    target = (Path(base) / rel).resolve()
+    return target == real or real in target.parents
+
+
 def _file_in(base: Path, rel: str) -> FileResponse:
     base = base.resolve()
     target = (base / rel).resolve()
@@ -145,6 +155,37 @@ def create_app(runs_dir: Path, data_dir: Path | None = None, start_worker: bool 
 
     app = FastAPI(title="flawmap", lifespan=lifespan)
     app.state.store, app.state.worker = store, worker
+
+    @app.middleware("http")
+    async def revalidate_code_and_data(request: Request, call_next):
+        """Pages, scripts, styles and JSON are checked with the server on every load (ETag, so mostly
+        a 304): the viewer is read from web/ on every request, and without this a browser kept an
+        earlier viewer.js or defects.json from its heuristic cache and showed a result without its
+        realistic view (2026-11-19)."""
+        resp = await call_next(request)
+        ctype = resp.headers.get("content-type", "")
+        if any(t in ctype for t in ("text/html", "javascript", "text/css", "application/json")):
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+    # ------------------------------------------------------------------ candidate comparison (local only)
+    @app.post("/api/compare/ratings")
+    async def compare_ratings(request: Request):
+        """Ratings from web/compare.html, appended to runs/compare/<rec>/ratings.json (recon.runner)."""
+        if request.client is None or request.client.host not in LOCAL:
+            raise HTTPException(403)
+        body = await request.json()
+        rec = str(body.get("rec", ""))
+        if not rec or not all(ch.isalnum() or ch in "-_" for ch in rec):
+            raise HTTPException(400, "bad recording id")
+        d = runs_dir / "compare" / rec
+        if not (d / "index.json").exists():
+            raise HTTPException(404)
+        p = d / "ratings.json"
+        rows = json.loads(p.read_text()) if p.exists() else []
+        rows.append({**body, "received": time.strftime("%Y-%m-%d %H:%M:%S")})
+        p.write_text(json.dumps(rows, ensure_ascii=False, indent=1))
+        return {"ok": True, "n": len(rows)}
 
     # ------------------------------------------------------------------ development viewer
     @app.get("/api/bundles")
@@ -216,7 +257,8 @@ def create_app(runs_dir: Path, data_dir: Path | None = None, start_worker: bool 
         out.update({"stage": d.get("stage"), "stage_ko": STAGE_KO.get(d.get("stage") or "", d.get("stage")),
                     "progress": d.get("progress"), "jobs_ahead": store.jobs_ahead(d["id"]), "eta_s": eta,
                     "started": d.get("started"), "error": d.get("error"), "published": bool(d.get("published")),
-                    "listed": bool(d.get("listed")), "share_url": f"/r/{d['share']}", "view_url": f"/s/{d['owner']}/view",
+                    "listed": bool(d.get("listed")), "share_env": bool(d.get("share_env")),
+                    "share_url": f"/r/{d['share']}", "view_url": f"/s/{d['owner']}/view",
                     "owner_url": f"/s/{d['owner']}"})
         return out
 
@@ -255,7 +297,8 @@ def create_app(runs_dir: Path, data_dir: Path | None = None, start_worker: bool 
         if d["status"] != "done":
             raise HTTPException(404)
         return _viewer_html({"bundle": f"/s/{owner}/bundle/", "role": "owner", "back": f"/s/{owner}", "inspection": report_public(d),
-                             "share_url": f"/r/{d['share']}", "published": bool(d.get("published")), "listed": bool(d.get("listed"))})
+                             "share_url": f"/r/{d['share']}", "published": bool(d.get("published")), "listed": bool(d.get("listed")),
+                             "realistic": True, "share_env": bool(d.get("share_env"))})
 
     @app.get("/r/{share}")
     def shared_result(share: str):
@@ -263,7 +306,7 @@ def create_app(runs_dir: Path, data_dir: Path | None = None, start_worker: bool 
         if d is None or not shared(d):
             return HTMLResponse((repo_root() / "web" / "service" / "unavailable.html").read_text(), status_code=404)
         return _viewer_html({"bundle": f"/r/{share}/bundle/", "role": "viewer", "back": "/gallery" if d.get("listed") else "/",
-                             "inspection": report_public(d)})
+                             "inspection": report_public(d), "realistic": bool(d.get("share_env"))})
 
     @app.get("/s/{owner}/bundle/{path:path}")
     def owner_file(owner: str, path: str):
@@ -272,7 +315,7 @@ def create_app(runs_dir: Path, data_dir: Path | None = None, start_worker: bool 
     @app.get("/r/{share}/bundle/{path:path}")
     def shared_file(share: str, path: str):
         d = need(store.by_share(share))
-        if not shared(d):
+        if not shared(d) or (_realistic_file(bundle_dir(d), path) and not d.get("share_env")):
             raise HTTPException(404)
         return _file_in(bundle_dir(d), path)
 
@@ -349,7 +392,8 @@ def create_app(runs_dir: Path, data_dir: Path | None = None, start_worker: bool 
             raise HTTPException(409, "not processed yet")
         published = bool(body.get("published", d.get("published")))
         listed = bool(body.get("listed", d.get("listed"))) and published       # the gallery needs a working link
-        store.update(d["id"], published=int(published), listed=int(listed))
+        share_env = bool(body.get("share_env", d.get("share_env")))
+        store.update(d["id"], published=int(published), listed=int(listed), share_env=int(share_env))
         return owner_view(store.get(d["id"]))
 
     @app.delete("/api/inspections/{owner}")
@@ -395,7 +439,14 @@ def create_app(runs_dir: Path, data_dir: Path | None = None, start_worker: bool 
         return {"jobs": rows, "disk_free_gb": round(free / 1e9, 1), "current": worker.current if worker else None,
                 "worker_alive": bool(worker and worker.is_alive())}
 
-    app.mount("/runs", StaticFiles(directory=str(runs_dir)), name="runs")
+    @app.get("/runs/{path:path}")
+    def run_file(path: str, request: Request):
+        """Development files under runs/ (the dev viewer, the comparison page): from this machine only,
+        since they skip the tokens (the realistic views among them show the rooms recorded in)."""
+        if request.client is None or request.client.host not in LOCAL:
+            raise HTTPException(404)
+        return _file_in(runs_dir, path)
+
     app.mount("/service", StaticFiles(directory=str(web_dir / "service")), name="service")
     app.mount("/", StaticFiles(directory=str(web_dir)), name="web")
     return app
@@ -404,7 +455,8 @@ def create_app(runs_dir: Path, data_dir: Path | None = None, start_worker: bool 
 def seed_demo(store, runs_dir: Path, names: dict[str, dict]) -> list[str]:
     """Register already processed runs (``runs/<name>``) as shared, listed example results, once;
     an example whose run was processed again since (newer ``run.json``) gets its summary, title and
-    device refreshed."""
+    device refreshed. ``share_env``: the realistic view is shared too (the team's own captures);
+    ``replaces``: the example from that run is taken off the gallery and its link points here."""
     from ..service.job import summarize
 
     have = {Path(d["run_dir"]).resolve(): d for d in store.list(limit=1000) if d.get("run_dir")}
@@ -418,26 +470,42 @@ def seed_demo(store, runs_dir: Path, names: dict[str, dict]) -> list[str]:
             if d.get("source") == "demo" and (rd / "run.json").stat().st_mtime > float(d.get("finished") or 0):
                 s = summarize(rd)
                 store.update(d["id"], summary=s, finished=time.time(), title=meta.get("title", name), device=meta.get("device", "iphone-12"),
-                             n_passes=len(json.loads((rd / "run.json").read_text()).get("passes", [])))
+                             n_passes=len(json.loads((rd / "run.json").read_text()).get("passes", [])),
+                             share_env=int(bool(meta.get("share_env"))))
+            _supersede_demo(store, have, runs_dir, meta, d)
             continue
         d = store.create(device=meta.get("device", "iphone-12"), title=meta.get("title", name), seller=meta.get("requester", ""),
-                         source="demo", status="done", run_dir=str(rd), published=True, listed=True)
+                         source="demo", status="done", run_dir=str(rd), published=True, listed=True,
+                         share_env=bool(meta.get("share_env")))
         s = summarize(rd)
         store.update(d["id"], summary=s, finished=time.time(), started=time.time() - (s.get("seconds") or 0),
                      n_passes=len(json.loads((rd / "run.json").read_text()).get("passes", [])))
+        _supersede_demo(store, have, runs_dir, meta, d)
         added.append(d["id"])
     return added
 
 
-DEMO_RESULTS = {   # seeded in this order; the gallery shows the newest first
-    "synth_dent": {"title": "아이폰 12 블랙, 모서리 찍힘 (가상 촬영 예시)", "requester": "예시"},
-    "synth_demo": {"title": "아이폰 12 블랙 (가상 촬영 예시, 두 면)", "requester": "예시"},
+def _supersede_demo(store, have: dict, runs_dir: Path, meta: dict, d: dict) -> None:
+    """The example of ``meta["replaces"]`` (a run name) gives way to ``d``: off the gallery, its link
+    says where the new one is."""
+    old = have.get((Path(runs_dir) / meta["replaces"]).resolve()) if meta.get("replaces") else None
+    if old and old["id"] != d["id"] and old.get("superseded_by") != d["id"]:
+        store.update(old["id"], superseded_by=d["id"], listed=0)
+
+
+DEMO_RESULTS = {   # seeded in this order; the gallery shows the newest first. share_env: the realistic view goes with
+    # the link (synthetic renders, a public dataset's videos, the team's own capture: no one's private room; the
+    # user's decision of 2026-11-20)
+    "synth_dent": {"title": "아이폰 12 블랙, 모서리 찍힘 (가상 촬영 예시)", "requester": "예시", "share_env": True},
+    "synth_demo": {"title": "아이폰 12 블랙 (가상 촬영 예시, 두 면)", "requester": "예시", "share_env": True},
     "uco3d_59015-27660-21826": {"device": "template", "title": "흰색 아이폰, 액정 금 (공개 영상 uCO3D 59015-27660-21826, CC BY 4.0)",
-                                "requester": "공개 데이터"},
+                                "requester": "공개 데이터", "share_env": True},
     "uco3d_2712-37354-8763": {"device": "template", "title": "청록 테두리 휴대폰, 액정 금 (공개 영상 uCO3D 2712-37354-8763, CC BY 4.0)",
-                              "requester": "공개 데이터"},
-    "real_ipad": {"device": "template", "title": "아이패드 프로 13\" 은색, 두 면 (팀 실제 촬영, 나무 바닥, 보드·도면 없음)",
-                  "requester": "팀 촬영"},
+                              "requester": "공개 데이터", "share_env": True},
+    # the team's iPad with the realistic view (recon.service, 2026-11-19); it takes the place of "real_ipad"
+    # (the same run before the realistic view, kept as it was)
+    "real_ipad_r5": {"device": "template", "title": "아이패드 프로 13\" 은색, 두 면 (팀 실제 촬영, 나무 바닥, 보드·도면 없음)",
+                     "requester": "팀 촬영", "share_env": True, "replaces": "real_ipad"},
 }
 
 

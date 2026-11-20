@@ -306,8 +306,19 @@ def joint_fit(model, face_up: str, frames: dict[int, np.ndarray], cams: dict[int
               max_points_per_view: int = 400, sigma_knot_deg=(0.5, 0.5, 3.0), sigma_knot_mm: float = 15.0,
               sigma_floor_mm: float = 1.5, masks: dict[int, np.ndarray] | None = None, mask_weight: float = 0.3,
               mask_points_per_view: int = 150, fit_scale: bool = False, scale_init: np.ndarray | None = None,
-              thickness_sigma: float | None = None, log=print) -> JointFit:
+              thickness_sigma: float | None = None, T_base: np.ndarray | None = None, prior_steps: bool = False,
+              quadratic_prior: bool = False, knot_bounds: tuple[float, float] | None = None, log=print) -> JointFit:
     """Device heading/position (on the floor) and a piecewise-linear ARKit drift, from image edges.
+    ``T_base``: the device lies on the z = 0 plane of this frame instead of the floor (world <- plane;
+    ``anchor.placement`` for a device on a stand or leaning); its heading turns about that plane's normal.
+    ``prior_steps``: the knot prior is on the change from one knot to the next (a random walk: drift
+    builds up) instead of on each knot. ``quadratic_prior``: the prior keeps its quadratic cost however
+    far off (least_squares' Huber loss is applied to every residual; on the priors it made the cost
+    grow only linearly, and on 509e5ece1b two knots over a stretch of edge-on views ran to 4 m and 80
+    degrees, cancelling each other, at 0.85 px; 2026-11-18). ``knot_bounds`` = (deg, mm): each knot's
+    rotation and translation are held within these (over the last seconds of black screen on 509e5ece1b
+    the outline alone still let the end run to 1.4 m and 48 degrees; ARKit's true drift was below
+    40 mm and 12 degrees).
     ``knot_times`` are fixed for the whole recording so that fits on growing time windows can hand
     their knots on (``knots_init``). ``masks``: device masks for the mask term (``anchor.register``).
 
@@ -324,13 +335,15 @@ def joint_fit(model, face_up: str, frames: dict[int, np.ndarray], cams: dict[int
     R0 = rest_pose(model, face_up)
     # the device: heading (deg, about the world z axis) and position offsets; its tilt stays the resting
     # tilt of ``rest_pose`` (it lies on the floor, and ARKit's gravity is the world z axis)
-    c0 = T_init[:3, 3].copy()
-    Rz = T_init[:3, :3] @ R0[:3, :3].T
+    Tb = np.eye(4) if T_base is None else np.asarray(T_base, float)
+    Ti = inv_T(Tb) @ T_init
+    c0 = Ti[:3, 3].copy()
+    Rz = Ti[:3, :3] @ R0[:3, :3].T
     yaw0 = float(np.degrees(np.arctan2(Rz[1, 0], Rz[0, 0])))
 
     def T_dev(q):
         yaw, dx, dy, dz = q
-        return make_T(rot_z(yaw0 + yaw) @ R0[:3, :3], [c0[0] + dx, c0[1] + dy, c0[2] + dz])
+        return Tb @ make_T(rot_z(yaw0 + yaw) @ R0[:3, :3], [c0[0] + dx, c0[1] + dy, c0[2] + dz])
 
     kt = np.asarray(knot_times, float)
     n_knots = len(kt)
@@ -412,16 +425,30 @@ def joint_fit(model, face_up: str, frames: dict[int, np.ndarray], cams: dict[int
                 Twc = drift_of(i, knots_, c_) @ Tw[i]
                 p, _ = _project(cams[i], inv_T(Twc), (Xm * sc) @ T_wcad_[:3, :3].T + T_wcad_[:3, 3])
                 out.append(wm * fields[i](p)[0])
-            pri = [knots_[1:, :3].ravel() / np.tile(sr, n_knots - 1), knots_[1:, 3:].ravel() / sigma_knot_mm]
+            kk = np.diff(knots_, axis=0) if prior_steps else knots_[1:]
+            pri = [kk[:, :3].ravel() / np.tile(sr, n_knots - 1), kk[:, 3:].ravel() / sigma_knot_mm]
+            if quadratic_prior:
+                # Huber on z' gives z^2 beyond 1 when z' = sign(z) (z^2 + 1) / 2 (continuous, slope 1 at 1)
+                pri = [np.where(np.abs(z) > 1.0, np.sign(z) * (z * z + 1.0) / 2.0, z) for z in pri]
             if zf_target is not None:
                 pri.append(np.array([(T_wcad_[2, 3] - zf_target - (sc[2] - 1.0) * half_T) / sigma_floor_mm]))
-            if fit_scale and thickness_sigma:
-                pri.append(np.array([qq[-1] / thickness_sigma]))
+            if fit_scale:
+                # held (thickness_sigma) or free; a free factor still gets a weak 25 % prior: on a capture
+                # filmed only from above (cc53da7c23, 2026-11-18) the side band hardly showed and the
+                # factor ran to 0, and the plate model could not be built
+                pri.append(np.array([qq[-1] / (thickness_sigma if thickness_sigma else 0.25)]))
             return np.concatenate(out + pri)
 
         n_data = sum(len(d[1]) for d in data)
         r0 = residuals(q)[:n_data]
-        sol = least_squares(residuals, q, loss="huber", f_scale=huber_px, max_nfev=30,
+        bounds = (-np.inf, np.inf)
+        if knot_bounds is not None:
+            kb = np.tile(np.r_[[np.radians(knot_bounds[0])] * 3, [knot_bounds[1]] * 3], n_knots - 1)
+            lo = np.r_[np.full(4, -np.inf), -kb, np.full(ns, -np.inf)]
+            hi = np.r_[np.full(4, np.inf), kb, np.full(ns, np.inf)]
+            q = np.clip(q, lo + 1e-9, hi - 1e-9)
+            bounds = (lo, hi)
+        sol = least_squares(residuals, q, loss="huber", f_scale=huber_px, max_nfev=30, bounds=bounds,
                             x_scale=np.r_[0.05, 0.2, 0.2, 0.2, np.tile(np.r_[1e-3, 1e-3, 1e-3, 0.2, 0.2, 0.2], n_knots - 1),
                                           np.full(ns, 3e-3)])
         q = sol.x
@@ -575,4 +602,76 @@ def boardless_poses(cap, frames: dict[int, np.ndarray], cams: dict[int, Camera],
     log(f"  boardless: ARKit drift up to {info['drift_mm_max']:.1f} mm / {info['drift_deg_max']:.2f} deg, "
         f"outline residual {info['median_px']:.2f} px")
     poses = CapturePoses(ids, final, {i: "model" for i in ids}, {}, T_W_ARK, {"mode": "boardless", **info})
+    return BoardlessResult(poses, fit.T_world_cad, info)
+
+
+def tilted_poses(cap, frames: dict[int, np.ndarray], cams: dict[int, Camera], model, face_up: str, inits: list[np.ndarray],
+                 T_base: np.ndarray, masks: dict[int, np.ndarray] | None = None, n_fit_views: int = 48, fit_plate: bool = False,
+                 knots_per_s: float = 1 / 2.5, max_knots: int = 10, windows=(0.25, 0.4, 0.55, 0.7, 0.85, 1.0), mask_weight: float = 0.6,
+                 log=print) -> BoardlessResult:
+    """``boardless_poses`` for a device that stands or leans (``anchor.placement``): the same joint fit of
+    the device's pose, the plate's size and a piecewise-linear ARKit drift to the image edges and the
+    masks, on growing time windows, but the device lies on its own plane (``T_base``: world <- plane)
+    instead of the floor, and there is no floor prior. ``inits``: the 180-degree twins of the first
+    ``T_world_cad``; the one with the smaller residual after a short fit on the first 40 % is kept.
+
+    Filmed all round a stand (509e5ece1b, 20.8 s), ARKit drifted about 36 mm between the device's two
+    sides; with the raw ARKit poses no plate fitted both (mask IoU p10 0.48, 2026-11-18). The floor
+    path's schedule (a knot every ~4 s, windows 40/70/100 %, mask weight 0.3) left the last third
+    (the screen side) 20-40 px off (IoU p10 there 0.25); a knot every 2.5 s, six windows and mask
+    weight 0.6 gave 0.81 (all frames: p10 0.57 -> 0.83, edges 0.65 -> 0.64 px)."""
+    ids = sorted(frames)
+    Tw = {i: T_W_ARK @ cap.T_ark_cam[i] for i in ids}
+    times = {i: float(cap.timestamps[i] - cap.timestamps[0]) for i in ids}
+    info: dict = {"mode": "tilted"}
+    fit_views = [ids[int(k)] for k in np.linspace(0, len(ids) - 1, min(n_fit_views, len(ids))).round()]
+    t_lo, t_hi = min(times.values()), max(times.values())
+    n_knots = int(np.clip(round((t_hi - t_lo) * knots_per_s) + 1, 3, max_knots))
+    kt = np.linspace(t_lo, t_hi, n_knots)
+    # the plate's size is held here (it comes from LiDAR, which is metric): without a floor, moving the
+    # cameras along their axes (the drift) looks the same as a larger plate, and with the size free the
+    # leaning iPad came out 289.8 x 220.2 mm (281.6 x 215.5; 6c417d24a0, 2026-11-18). The outline size
+    # fit (anchor.template) measures it afterwards on the drift-corrected cameras.
+    fit_scale = False
+    t_sigma = 1e-3
+
+    def window(frac):
+        return [i for i in fit_views if times[i] <= t_lo + frac * (t_hi - t_lo) + 1e-9]
+
+    # drift as a random walk (per knot step 1 / 1 / 3 deg and 15 mm), its prior quadratic however far off
+    prior = dict(prior_steps=True, quadratic_prior=True, sigma_knot_deg=(1.0, 1.0, 3.0), sigma_knot_mm=15.0, knot_bounds=(15.0, 80.0))
+    trials = []
+    for T0 in inits:
+        f = joint_fit(model, face_up, frames, cams, Tw, times, T0, None, window(windows[0]), kt, searches=(12.0, 6.0), masks=masks,
+                      mask_weight=mask_weight, fit_scale=fit_scale, thickness_sigma=t_sigma, T_base=T_base, **prior, log=lambda m: None)
+        trials.append((f.rounds[-1]["median_abs_px_after"] if f.rounds else np.inf, f))
+    trials.sort(key=lambda x: x[0])
+    info["candidates_px"] = [round(t[0], 3) for t in trials]
+    log(f"  tilted: twins (median px after a short fit) {info['candidates_px']}")
+    fit = trials[0][1]
+    for frac in windows:
+        vs = window(frac)
+        t_end = max(times[i] for i in vs)
+        kn = fit.knots.copy()
+        last = int(np.searchsorted(kt, t_end - 1e-9))
+        cover = max(1, min(last, n_knots - 1))
+        kn[cover + 1:] = kn[cover]
+        # every window adds views whose drift starts as the last covered knot's, so each one begins with a wide
+        # search, the last one too: with 6 px there, the last seconds of 509e5ece1b (the screen side, after the
+        # stand) matched other edges 80 mm off in one run (mask IoU 0.08-0.11 at frames 999-1132; screen side p50
+        # 0.815) and fitted in another with a plate 0.4 mm different (0.927), 2026-11-19
+        fit = joint_fit(model, face_up, frames, cams, Tw, times, fit.T_world_cad, None, vs, kt, knots_init=kn,
+                        searches=(12.0, 6.0, 4.0) if frac < 1.0 else (12.0, 6.0, 4.0, 3.0, 2.5), masks=masks, mask_weight=mask_weight,
+                        fit_scale=fit_scale, scale_init=fit.scale, thickness_sigma=t_sigma, T_base=T_base, **prior, log=log)
+    final = {i: fit.drift[i] @ Tw[i] for i in ids}
+    c = fit.T_world_cad[:3, 3]
+    dv = np.array([_drift_vec(fit.drift[i], c) for i in ids])
+    info.update({"n_frames": len(ids), "n_knots": n_knots, "rounds": fit.rounds,
+                 "drift_mm_max": float(np.linalg.norm(dv[:, 3:], axis=1).max()),
+                 "drift_deg_max": float(np.degrees(np.linalg.norm(dv[:, :3], axis=1)).max()),
+                 "median_px": fit.rounds[-1]["median_abs_px_after"] if fit.rounds else None,
+                 "plate_scale": None if fit.scale is None else [round(float(x), 5) for x in fit.scale]})
+    log(f"  tilted: ARKit drift up to {info['drift_mm_max']:.1f} mm / {info['drift_deg_max']:.2f} deg, "
+        f"outline residual {info['median_px']:.2f} px")
+    poses = CapturePoses(ids, final, {i: "model" for i in ids}, {}, T_W_ARK, {"mode": "tilted", **info})
     return BoardlessResult(poses, fit.T_world_cad, info)

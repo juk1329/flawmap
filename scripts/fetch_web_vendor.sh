@@ -13,6 +13,7 @@ files=(
   examples/jsm/loaders/GLTFLoader.js
   examples/jsm/utils/BufferGeometryUtils.js
   examples/jsm/environments/RoomEnvironment.js
+  examples/jsm/postprocessing/Pass.js      # needed by Spark (candidate comparison page)
 )
 for f in "${files[@]}"; do
   mkdir -p "$V/$(dirname "$f")"
@@ -20,3 +21,14 @@ for f in "${files[@]}"; do
   echo "$(wc -c < "$V/$f") $f"
 done
 echo "three@${VER}" > "$V/VERSION"
+
+# Spark (MIT, World Labs): Gaussian-splat renderer for three.js >= r180, used by the candidate
+# comparison page (web/compare.html) for the splat candidates
+SV=2.4.0
+S="$HERE/../web/vendor/spark"
+mkdir -p "$S"
+for f in dist/spark.module.min.js LICENSE; do
+  curl -s -f -L -m 120 -o "$S/$(basename "$f")" "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@${SV}/$f"
+  echo "$(wc -c < "$S/$(basename "$f")") spark/$(basename "$f")"
+done
+echo "@sparkjsdev/spark@${SV}" > "$S/VERSION"

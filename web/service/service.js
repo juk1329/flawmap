@@ -51,7 +51,7 @@ export function tagHTML(insp, { href = null, big = false } = {}) {
 }
 
 export function topbar(current) {
-  const links = [['/new', '검수 요청'], ['/gallery', '공개된 결과']];
+  const links = [['/new', '검수 요청'], ['/gallery', '검수 결과']];
   return `<div class="wrap"><a class="brand" href="/"><span class="mark" aria-hidden="true"></span>flawmap</a>` +
     `<nav>${links.map(([h, t]) => `<a href="${h}"${h === current ? ' aria-current="page"' : ''}>${t}</a>`).join('')}</nav></div>`;
 }

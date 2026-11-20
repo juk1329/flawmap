@@ -224,3 +224,84 @@ def test_recover_requeues_once_then_fails(tmp_path):
     s.claim_next()
     s.recover(lambda pid: False)
     assert s.get(d["id"])["status"] == "failed"
+
+
+def test_compare_ratings_are_appended_for_known_recordings(client, tmp_path):
+    rec = tmp_path / "runs" / "compare" / "abc123"
+    rec.mkdir(parents=True)
+    (rec / "index.json").write_text('{"rec": "abc123"}')
+    body = {"rec": "abc123", "blind": True, "ratings": [{"panel": "A", "candidate": "c2", "realism": 4, "stable": 5, "defects": 3, "note": ""}]}
+    r = client.post("/api/compare/ratings", json=body)
+    assert r.status_code == 200 and r.json()["n"] == 1
+    assert client.post("/api/compare/ratings", json=body).json()["n"] == 2
+    import json as _json
+    rows = _json.loads((rec / "ratings.json").read_text())
+    assert rows[1]["ratings"][0]["candidate"] == "c2" and "received" in rows[1]
+    assert client.post("/api/compare/ratings", json={**body, "rec": "../x"}).status_code == 400
+    assert client.post("/api/compare/ratings", json={**body, "rec": "nope"}).status_code == 404
+
+
+def test_realistic_view_is_shared_only_when_allowed(client, stray_zip):
+    """The realistic view's files (bundle/real/, their reflections show the room) reach the shared link
+    only with share_env; the requester always gets them."""
+
+    def runner_with_real(passes, device, out, progress=None, meta=None):
+        rep = fake_runner(passes, device, out, progress, meta)
+        (out / "bundle" / "real" / "back").mkdir(parents=True)
+        (out / "bundle" / "real" / "back" / "manifest.json").write_text("{}")
+        return rep
+
+    c = client
+    c.app.state.worker.inline_runner = runner_with_real
+    r = c.post("/api/inspections", data={"device": "iphone-12"}, files={"back": ("cap.zip", stray_zip, "application/zip")})
+    d = r.json()
+    owner, share = d["owner_url"].split("/")[-1], d["share_url"].split("/")[-1]
+    d = _wait(c, owner, "done")
+    assert d["share_env"] is False
+    assert c.get(f"/s/{owner}/bundle/real/back/manifest.json").status_code == 200
+    assert '"realistic": true' in c.get(f"/s/{owner}/view").text
+    d = c.post(f"/api/inspections/{owner}/share", json={"published": True}).json()
+    assert d["published"] and not d["share_env"]
+    assert c.get(f"/r/{share}/bundle/defects.json").status_code == 200
+    assert c.get(f"/r/{share}/bundle/real/back/manifest.json").status_code == 404
+    assert '"realistic": false' in c.get(f"/r/{share}").text
+    d = c.post(f"/api/inspections/{owner}/share", json={"share_env": True}).json()
+    assert d["share_env"] and d["published"]
+    assert c.get(f"/r/{share}/bundle/real/back/manifest.json").status_code == 200
+    assert '"realistic": true' in c.get(f"/r/{share}").text
+
+
+def test_realistic_file_check_resolves_the_path(tmp_path):
+    from flawmap.server.app import _realistic_file
+
+    (tmp_path / "real" / "back").mkdir(parents=True)
+    assert _realistic_file(tmp_path, "real/back/manifest.json")
+    assert _realistic_file(tmp_path, "evidence/../real/back/views/000.webp")
+    assert not _realistic_file(tmp_path, "evidence/real/a.jpg") and not _realistic_file(tmp_path, "realx/a")
+
+
+def test_service_split_holds_validation_blocks_only():
+    from flawmap.recon.service import service_split
+
+    s = service_split(np.arange(0, 20.0, 1 / 30))
+    assert not s.test and len(s.val) > 0 and len(s.guard) > 0
+    assert not (set(s.val) & set(s.train)) and len(s.train) + len(s.val) + len(s.guard) == 600
+
+
+def test_seeded_example_replaces_the_older_one(tmp_path):
+    """A gallery example built again (here with the realistic view) takes the older one's place:
+    the old one leaves the list and its link says where the new one is."""
+    from flawmap.server.app import seed_demo
+
+    runs = tmp_path / "runs"
+    for name in ("ex", "ex_r5"):
+        (runs / name / "bundle").mkdir(parents=True)
+        (runs / name / "run.json").write_text(json.dumps({"passes": [{"name": "back"}], "defects": [], "coverage": {}}))
+        (runs / name / "bundle" / "defects.json").write_text(json.dumps({"defects": []}))
+    store = Store(tmp_path / "service")
+    (old_id,) = seed_demo(store, runs, {"ex": {"title": "예시"}})
+    (new_id,) = seed_demo(store, runs, {"ex_r5": {"title": "예시", "share_env": True, "replaces": "ex"}})
+    old, new = store.get(old_id), store.get(new_id)
+    assert old["superseded_by"] == new_id and not old["listed"] and old["published"]
+    assert new["listed"] and new["share_env"] and not new["superseded_by"]
+    assert seed_demo(store, runs, {"ex_r5": {"title": "예시", "share_env": True, "replaces": "ex"}}) == []   # once

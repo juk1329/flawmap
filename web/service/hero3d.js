@@ -1,5 +1,6 @@
 // The home page's live example: a real result turning slowly on the grey mat, its defects outlined
-// in red. It is the same bundle the result page shows (model, surface texture, outline overlay).
+// in red. It is the same bundle the result page shows (model, surface texture, outline overlay), in
+// its realistic view when the bundle has one and the link may show it (web/recon/realistic.js).
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -48,6 +49,11 @@ export async function heroModel(canvas, base) {
   const o = new THREE.Mesh(mesh.geometry, new THREE.MeshBasicMaterial({ map: ovl, transparent: true, depthWrite: false, polygonOffset: true,
     polygonOffsetFactor: -2, polygonOffsetUnits: -2, side: THREE.DoubleSide }));
   scene.add(o);
+  // the realistic view replaces the surface model once it has loaded; the outlines stay on top
+  let layers = [];
+  import('/recon/realistic.js').then(({ realisticLayers }) => realisticLayers(base, data, scene))
+    .then((ls) => { layers = ls; if (layers.length) mesh.visible = false; })
+    .catch(() => { layers = []; });
 
   function resize() {
     const r = canvas.getBoundingClientRect();
@@ -60,6 +66,7 @@ export async function heroModel(canvas, base) {
   renderer.setAnimationLoop(() => {
     controls.update();
     head.position.copy(camera.position);
+    for (const l of layers) l.update(camera);
     renderer.render(scene, camera);
   });
   return data;

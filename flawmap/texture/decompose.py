@@ -21,10 +21,13 @@ offers, each with the finest view the capture has from that direction:
    its coarse (1 mm) shading is replaced by the keyframe median's (exposure, broad reflections and
    the photographer's shadow), and on the faces it is aligned to the keyframe median by ECC
    (affine, gradient magnitude; at most ``max_shift_mm``) to take out the poses' residual error.
-4. **Per texel over its bins** (weights 1 / resolution^2, bins within ``tau`` of the texel's finest
-   resolution): the *surface colour* is the weighted mean of the lower half of the lightness
-   distribution without its darkest tenth (reflections only add light; the darkest are noise or a
-   passing shadow); the *reflection excess* of each bin is its lightness above that.
+4. **Per texel over its bins** (``fuse``; weights 1 / resolution^2, bins within ``tau`` of the
+   texel's finest resolution): the *surface colour* is the lowest *well-supported* lightness: the
+   darkest sample whose lightness (within ``delta``) is shared by at least ``support`` of the
+   weight, and the weighted mean colour of the samples within ``delta`` of it. Reflections only add
+   light, so the surface is the low end; a single misaligned view of dark print is low too but has no
+   support (the plain lower half doubled the iPad's text 4 mm lower, 2026-11-17). The *reflection
+   excess* of each bin is its lightness above the surface colour.
 
 Outputs per chart (``ChartDecomposition``): surface colour, the per-bin reflection excess (for the
 multi-view detector, ``detect.multiview``), its maximum and mean, the number of usable bins, the
@@ -61,6 +64,7 @@ class PassFrames:
     T_world_cad: np.ndarray
     charts: list[str]
     undist: str = "none"
+    exclude: frozenset = frozenset()       # held-out frames: never slot owners (eval.heldout)
 
 
 @dataclass
@@ -136,7 +140,7 @@ def scan_slots(geom_c: ChartGeometry, passes: list[PassFrames], stride: int = 2,
         Pw = (geom_c.point @ Rw.T + tw).astype(np.float64)
         Nw = geom_c.normal @ Rw.T
         T_cad_world = inv_T(pf.T_world_cad)
-        ids = sorted(pf.T_world_cam)[::stride]
+        ids = [i for i in sorted(pf.T_world_cam)[::stride] if i not in pf.exclude]
         # motion blur assumes a continuous hand-held video; frames far apart (the synthetic captures:
         # 32 renders round the device) are not blurred by the camera's path between them
         steps = [np.linalg.norm(pf.T_world_cam[i + 1][:3, 3] - pf.T_world_cam[i][:3, 3]) for i in ids if i + 1 in pf.T_world_cam]
@@ -509,7 +513,7 @@ def pass_frames_from_prepared(pp, T_world_cad: np.ndarray | None = None) -> Pass
     key_T = {int(i): np.asarray(T) for i, T in poses.T_world_cam.items()}
     allT = all_frame_poses(np.asarray(cap.T_ark_cam), key_T, len(cap))      # ARKit corrected like the keyframes
     return PassFrames(pp.name, cap, Path(pp.video), allT, reg.T_world_cad if T_world_cad is None else T_world_cad, pp.charts,
-                      pp.report.get("undistortion", "none"))
+                      pp.report.get("undistortion", "none"), frozenset(getattr(pp, "exclude", frozenset())))
 
 
 # ---------------------------------------------------------------------------- command line (experiments on a finished run)

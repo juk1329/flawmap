@@ -37,7 +37,7 @@ async function load() {
       `<td>${j.status === 'processing' ? `${esc(j.stage_ko || '')} ${Math.round((j.progress || 0) * 100)}%` : ''}</td>` +
       `<td>${esc(j.device_name || j.device)}</td><td>${j.passes.map((p) => (p.face_up === 'back' ? '뒷면' : '화면')).join(', ')}</td>` +
       `<td>${when(j.created)}</td><td>${secs ? duration(secs) : ''}</td>` +
-      `<td>${j.status === 'done' ? `하자 ${s.n_defects}, 촬영 ${Math.round((s.coverage || 0) * 100)}%${j.published ? (j.listed ? ', 공개 목록' : ', 링크 공유') : ''}` : ''}</td>` +
+      `<td>${j.status === 'done' ? `하자 ${s.n_defects}, 촬영 ${Math.round((s.coverage || 0) * 100)}%${j.published ? (j.listed ? ', 결과 목록에 올림' : ', 링크 공유') : ''}` : ''}</td>` +
       `<td>${j.error ? `${esc(j.error.code)}<br><span class="small muted">${esc(j.error.detail || '')}</span>` : ''}</td>` +
       `<td><a href="${esc(j.owner_url)}">열기</a></td></tr>`;
   }).join('');

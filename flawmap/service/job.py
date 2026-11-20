@@ -19,6 +19,7 @@ from .store import Store
 STAGE_KO = {
     "start": "처리 준비", "decode": "영상 읽기", "poses": "카메라 위치 찾기", "register": "기기 모델 맞추기",
     "samples": "표면 색 모으기", "detect": "하자 찾기", "evidence": "근거 장면 고르기", "bundle": "결과 만들기",
+    "realistic": "실물처럼 보기 만들기",
 }
 
 
@@ -50,7 +51,9 @@ def summarize(run_dir: Path) -> dict:
             thumb = mid[len(mid) // 3]["img"]
     except Exception:
         pass
+    real = rep.get("realistic") or {}
     return {"n_defects": len(rep.get("defects", [])), "by_type": by_type, "coverage": cov.get("overall"),
+            "realistic": [f["face"] for f in real.get("faces", [])],
             "coverage_by_part": cov.get("by_part"), "coverage_by_chart": cov.get("by_chart"), "advice": rep.get("advice", []),
             "processing": rep.get("processing", {}), "device_name": rep.get("device_name"),
             "defects": [{k: d.get(k) for k in ("id", "type", "part", "confidence", "location_ko")} for d in rep.get("defects", [])],
@@ -67,10 +70,12 @@ def finish_superseding(store: Store, d: dict) -> None:
                          published=old.get("published") or d.get("published") or 0, listed=old.get("listed") or d.get("listed") or 0)
 
 
-def process(store: Store, iid: str, runner=None, public_runner=None) -> dict:
+def process(store: Store, iid: str, runner=None, public_runner=None, realistic=None) -> dict:
     """Run the pipeline for inspection ``iid``. ``runner(passes, device, out, progress, meta)`` for
     uploaded Stray Scanner captures defaults to ``flawmap.pipeline.run``; ``public_runner(name, out,
-    face_up, progress, meta)`` for public uCO3D videos to ``flawmap.pipeline.run_uco3d`` (tests pass fakes)."""
+    face_up, progress, meta)`` for public uCO3D videos to ``flawmap.pipeline.run_uco3d`` (tests pass fakes).
+    ``realistic(run_dir, progress)`` then adds the realistic view to a Stray capture's result
+    (``flawmap.recon.service.build_realistic``; False: none). The result is done without it if it fails."""
     from ..pipeline import PassInput
 
     d = store.get(iid)
@@ -98,6 +103,13 @@ def process(store: Store, iid: str, runner=None, public_runner=None) -> dict:
             rep = public_runner(p0["name"], Path(d["run_dir"]), face_up=p0["face_up"], progress=progress, meta=meta, **kw)
         else:
             rep = runner(passes, d["device"], Path(d["run_dir"]), progress=progress, meta=meta)
+            if realistic is None:
+                from ..recon.service import build_realistic as realistic
+            if realistic:
+                try:
+                    realistic(Path(d["run_dir"]), progress=progress)
+                except Exception as e:      # the inspection stands without the realistic view
+                    print(f"realistic view failed: {type(e).__name__}: {e}", file=sys.stderr)
         summary = summarize(Path(d["run_dir"]))
         # carry the earlier inspection's title and sharing over before the result shows as done,
         # so nobody sees a finished re-shoot without them

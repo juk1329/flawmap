@@ -393,10 +393,20 @@ def fit_footprint(share: np.ndarray, seen: np.ndarray, x0: float, y0: float, res
     if w < h:
         w, h, ang = h, w, ang + 90.0
     if size is not None:
-        p, iou = _fit_rounded_rect(fp, {"cx": cx, "cy": cy, "ang": ang, "L": size[0] / res, "W": size[1] / res, "r": size[2] / res},
-                                   keys=("cx", "cy", "ang"))
+        # the shape is held: both quarter turns of the starting heading (a footprint that is not the whole
+        # device can make the smallest rectangle's long side the device's short one: 6c417d24a0, 2026-11-18)
+        best = None
+        for a0 in (ang, ang + 90.0):
+            p_, iou_ = _fit_rounded_rect(fp, {"cx": cx, "cy": cy, "ang": a0, "L": size[0] / res, "W": size[1] / res, "r": size[2] / res},
+                                         keys=("cx", "cy", "ang"))
+            if best is None or iou_ > best[1]:
+                best = (p_, iou_)
+        p, iou = best
     else:
         p, iou = _fit_rounded_rect(fp, {"cx": cx, "cy": cy, "ang": ang, "L": w, "W": h, "r": 0.06 * h})
+    if p["W"] > p["L"]:
+        # the fit may turn the rectangle by a quarter and trade the sides: the long side stays the length
+        p = {**p, "L": p["W"], "W": p["L"], "ang": p["ang"] + 90.0}
     L, W, r = p["L"] * res, p["W"] * res, p["r"] * res
     centre = np.array([x0 + (p["cx"] + 0.5) * res, y0 - (p["cy"] + 0.5) * res])
     info = {"size_mm": [round(L, 2), round(W, 2)], "corner_radius_mm": round(r, 2), "iou": round(iou, 4), "from": "masks",

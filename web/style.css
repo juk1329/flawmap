@@ -62,6 +62,8 @@ h1 { font-size: 22px; font-weight: 600; margin: 0; }
 .modes button[aria-selected="true"] { background: #fff; color: var(--ink); font-weight: 500; box-shadow: 0 1px 2px rgba(29,33,37,0.12); }
 
 .view { position: relative; min-height: 0; }
+/* pins of far-away defects must not widen the page (that pushed the phone loupe sheet off screen) */
+#view3d { overflow: hidden; }
 #c3d { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
 #c3d:active { cursor: grabbing; }
 .status { position: absolute; left: 20px; bottom: 12px; margin: 0; color: var(--ink-2); font-size: 13px; }
@@ -257,4 +259,53 @@ h3 { font-size: 15px; font-weight: 600; margin: 18px 0 8px; }
   /* a phone: more room for the model, and the real-frame inset gives way to the mode switch */
   .app { grid-template-rows: 82vh auto; }
   .inset { display: none !important; }
+}
+
+/* ---------------------------------------------------------------- the way back to the whole device (2026-11-18)
+   A defect close-up turns the orbit about the defect. The home control sits at the top left of the canvas:
+   quiet while the whole device is in view, solid ink as soon as the view has moved away from it. Beside it,
+   the defects can be stepped through; at the top right, the gestures are listed on request. */
+.viewnav { position: absolute; top: 12px; left: 14px; z-index: 7; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.home-view, .howto-btn {
+  display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: 10px;
+  border: 1px solid rgba(29,33,37,0.22); background: rgba(255,255,255,0.62); color: var(--ink-2); font-size: 14px; cursor: pointer;
+}
+.home-view { padding-left: 11px; transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease; }
+.home-view:hover, .howto-btn:hover, .howto-btn[aria-expanded="true"] { background: #fff; color: var(--ink); }
+.home-view.away { background: var(--ink); border-color: var(--ink); color: #fff; font-weight: 500; }
+.home-view.away:hover { background: #33393f; color: #fff; }
+.home-view.nudge { animation: home-nudge 1.2s ease-out 1; }
+@keyframes home-nudge {
+  0% { box-shadow: 0 0 0 0 rgba(29,33,37,0.45); }
+  100% { box-shadow: 0 0 0 14px rgba(29,33,37,0); }
+}
+.home-view .hv-short { display: none; }
+.defect-steps { display: flex; height: 36px; border: 1px solid rgba(29,33,37,0.22); border-radius: 10px; overflow: hidden; }
+.defect-steps[hidden] { display: none; }
+.defect-steps button { border: 0; background: rgba(255,255,255,0.62); padding: 0 12px; font-size: 14px; cursor: pointer; }
+.defect-steps button + button { border-left: 1px solid rgba(29,33,37,0.18); }
+.defect-steps button:hover { background: #fff; }
+.howto { position: absolute; top: 12px; right: 14px; z-index: 7; }
+.howto-panel {
+  position: absolute; right: 0; top: 44px; width: 320px; padding: 6px 14px; background: var(--paper); color: var(--ink);
+  border: 1px solid rgba(29,33,37,0.18); border-radius: 12px; box-shadow: 0 10px 30px rgba(29,33,37,0.18); font-size: 13.5px; line-height: 1.45;
+}
+.howto-panel[hidden] { display: none; }
+.howto-panel dl { margin: 0; }
+.howto-panel dl div { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 10px; padding: 7px 0; }
+.howto-panel dl div + div { border-top: 1px solid var(--line); }
+.howto-panel dt { font-weight: 600; }
+.howto-panel dd { margin: 0; color: var(--ink-2); }
+@media (max-width: 600px) {
+  .viewnav { top: 10px; left: 10px; gap: 6px; }
+  .howto { top: 10px; right: 10px; }
+  .home-view .hv-long { display: none; }
+  .home-view .hv-short { display: inline; }
+  .home-view, .howto-btn, .defect-steps { height: 34px; }
+  .defect-steps button, .howto-btn { padding: 0 10px; }
+  .howto-panel { width: min(320px, calc(100vw - 20px)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-view { transition: none; }
+  .home-view.nudge { animation: none; }
 }

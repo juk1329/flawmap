@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>모델 후보 비교 | flawmap</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/build/three.module.js", "three/addons/": "./vendor/three/examples/jsm/",
+               "@sparkjsdev/spark": "./vendor/spark/spark.module.min.js" } }
+</script>
+<style>
+/* An inspection bench with several mats: every candidate model of the same device on its own mat,
+   all turned by one hand. Red marks a defect pin and nothing else. */
+:root {
+  --mat-top: #d9dbdf; --mat-bottom: #c4c8ce; --paper: #f5f6f7; --ink: #1d2125; --ink-2: #5b6168; --line: #d5d8dc;
+  --red: #e5251e; --focus: #1d2125;
+  --font: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { font-family: var(--font); font-size: 14px; line-height: 1.5; color: var(--ink); background: var(--paper);
+       font-variant-numeric: tabular-nums; word-break: keep-all; }
+button, select, input, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+header.top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 600; color: inherit; text-decoration: none; }
+.mark { width: 14px; height: 14px; background: conic-gradient(var(--ink) 0 25%, #fff 0 50%, var(--ink) 0 75%, #fff 0); border: 1px solid var(--ink); }
+h1 { font-size: 17px; font-weight: 600; margin: 0; }
+.field { display: flex; align-items: center; gap: 6px; color: var(--ink-2); }
+select, .btn { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 5px 9px; }
+.btn { cursor: pointer; }
+.btn:hover { border-color: #b9bec5; }
+.btn.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+.presets { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 20px; }
+.presets .sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
+.hint { color: var(--ink-2); font-size: 13px; }
+.grid { display: grid; gap: 12px; padding: 0 20px 14px; }
+.grid.n2 { grid-template-columns: 1fr 1fr; }
+.grid.n4 { grid-template-columns: 1fr 1fr; }
+.grid.n6 { grid-template-columns: 1fr 1fr 1fr; }
+.panel { position: relative; border-radius: 10px; overflow: hidden;
+         background: radial-gradient(120% 90% at 50% 35%, var(--mat-top), var(--mat-bottom)); }
+.panel .head { position: absolute; z-index: 3; left: 10px; top: 10px; right: 10px; display: flex; gap: 8px; align-items: center; pointer-events: none; }
+.panel .tag { pointer-events: auto; background: rgba(255,255,255,0.78); border-radius: 6px; padding: 3px 9px; font-weight: 600; }
+.panel .head select { pointer-events: auto; max-width: 70%; background: rgba(255,255,255,0.78); }
+.panel canvas { display: block; width: 100%; aspect-ratio: 4 / 3; }
+.panel .real { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; opacity: 0; pointer-events: none; z-index: 2; }
+.panel .state { position: absolute; z-index: 3; left: 12px; bottom: 10px; color: var(--ink-2); font-size: 12px; }
+#stage { touch-action: none; }
+.below { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 20px; padding: 6px 20px 40px; }
+h2 { font-size: 15px; margin: 6px 0 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { border-bottom: 1px solid var(--line); padding: 5px 6px; text-align: right; }
+th:first-child, td:first-child { text-align: left; }
+th { font-weight: 600; color: var(--ink-2); }
+td.best { font-weight: 600; }
+.note { color: var(--ink-2); font-size: 12.5px; margin-top: 6px; }
+.rate { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: #fff; }
+.rate .who { font-weight: 600; margin-bottom: 4px; }
+.rate .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+.rate .row span { width: 112px; color: var(--ink-2); }
+.rate textarea { width: 100%; min-height: 46px; border: 1px solid var(--line); border-radius: 6px; padding: 5px 7px; margin-top: 4px; }
+.saved { color: var(--ink-2); font-size: 13px; }
+pre.out { white-space: pre-wrap; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 12px; max-height: 180px; overflow: auto; }
+@media (max-width: 1200px) { .grid.n6 { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 900px) { .grid.n2, .grid.n4, .grid.n6 { grid-template-columns: 1fr; } .below { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/"><span class="mark" aria-hidden="true"></span>flawmap</a>
+  <h1>모델 후보 비교</h1>
+  <label class="field">녹화 <select id="rec"></select></label>
+  <label class="field">패널 <select id="npanel"><option value="2">2개</option><option value="4" selected>4개</option><option value="6">6개</option></select></label>
+  <button class="btn" id="blind" type="button" aria-pressed="false">블라인드</button>
+  <span class="hint" id="status"></span>
+</header>
+<div class="presets" role="toolbar" aria-label="시점">
+  <button class="btn" data-preset="home" type="button">기기 전체</button>
+  <button class="btn" data-preset="spin" type="button" aria-pressed="false">360° 돌리기</button>
+  <button class="btn" data-preset="graze" type="button">스치게 보기</button>
+  <button class="btn" data-preset="under" type="button">찍지 않은 면</button>
+  <span class="sep"></span>
+  <label class="field">하자로 <select id="defect"><option value="">고르기</option></select></label>
+  <span class="sep"></span>
+  <label class="field">시험 프레임 <select id="testframe"><option value="">고르기</option></select></label>
+  <label class="field"><input type="checkbox" id="showReal"> 실제 프레임 겹치기</label>
+  <span class="hint">스페이스를 누르고 있으면 실제 프레임이 보입니다</span>
+</div>
+<div class="grid n4" id="stage"></div>
+<div class="below">
+  <section>
+    <h2>지표</h2>
+    <div id="metrics"></div>
+    <p class="note">찍은 시점 사실감은 학습에서 뺀 1초 덩어리 시험 프레임에서 잽니다(노출 이득 맞춤 뒤, 기기 안).
+      아이패드 뒷면은 거의 균일해서 PSNR만으로는 빈 모델도 점수가 나옵니다. 세부 상관(로고·글자·가장자리 같은 1–4화소 세부가 실제와 맞는 정도)과
+      LPIPS, 덮은 비율을 함께 보세요. 돌려 보기는 판 모양 밖에 그려진 비율(떠다니는 점), 찍지 않은 면의 빈 비율, 1° 회전마다 화면이 바뀐 양(깜빡임)이고,
+      회전 튐은 한 바퀴 중 가장 크게 바뀐 1° 걸음이 보통 걸음의 몇 배인지입니다(1에 가까울수록 매끄럽게 돎).</p>
+  </section>
+  <section>
+    <h2>내 평가</h2>
+    <div id="ratings"></div>
+    <button class="btn" id="saveRatings" type="button">평가 저장</button>
+    <span class="saved" id="savedMsg"></span>
+    <pre class="out" id="ratingsOut" hidden></pre>
+  </section>
+</div>
+<script type="module" src="./compare.js"></script>
+</body>
+</html>

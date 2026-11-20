@@ -8,8 +8,9 @@
 
 Two random tokens per inspection: ``owner`` (the requester's page: progress, sharing, delete) and
 ``share`` (the read-only result for anyone the requester gives the link to, once ``published``).
-``listed`` also puts the result on the public gallery. The inspection id is shown on the result;
-the tokens are the only way in.
+``listed`` also puts the result on the public gallery. ``share_env`` also lets the shared link show
+the realistic view (``recon.service``), whose reflections show the room the recording was made in;
+the requester always sees it. The inspection id is shown on the result; the tokens are the only way in.
 
 States: uploaded -> queued -> processing -> done | failed. A superseded inspection (the seller
 filmed again) keeps its result but says so.
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS inspections (
     seller TEXT,
     published INTEGER DEFAULT 0,
     listed INTEGER DEFAULT 0,
+    share_env INTEGER DEFAULT 0,
     superseded_by TEXT,
     replaces TEXT,
     source TEXT DEFAULT 'upload',
@@ -76,6 +78,8 @@ class Store:
             if "listed" not in cols:      # databases from before 2026-11-16 evening: shared results were listed
                 con.execute("ALTER TABLE inspections ADD COLUMN listed INTEGER DEFAULT 0")
                 con.execute("UPDATE inspections SET listed = published")
+            if "share_env" not in cols:   # databases from before 2026-11-19: no realistic view to share
+                con.execute("ALTER TABLE inspections ADD COLUMN share_env INTEGER DEFAULT 0")
 
     # ------------------------------------------------------------------ basics
     def _con(self) -> sqlite3.Connection:
@@ -96,13 +100,15 @@ class Store:
         return d
 
     def create(self, device: str, title: str = "", price: int | None = None, seller: str = "", source: str = "upload",
-               status: str = "uploaded", run_dir: str | None = None, published: bool = False, listed: bool = False) -> dict:
+               status: str = "uploaded", run_dir: str | None = None, published: bool = False, listed: bool = False,
+               share_env: bool = False) -> dict:
         iid, now = new_id(), time.time()
         with self._con() as con:
             con.execute("INSERT INTO inspections (id, owner, share, created, updated, status, device, title, price, seller, "
-                        "source, run_dir, published, listed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "source, run_dir, published, listed, share_env) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (iid, secrets.token_urlsafe(16), secrets.token_urlsafe(16), now, now, status, device, title, price,
-                         seller, source, run_dir or str(self.dir(iid) / "run"), int(published), int(listed and published)))
+                         seller, source, run_dir or str(self.dir(iid) / "run"), int(published), int(listed and published),
+                         int(share_env)))
         self.dir(iid).mkdir(parents=True, exist_ok=True)
         return self.get(iid)
 

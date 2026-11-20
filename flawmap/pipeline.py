@@ -51,10 +51,13 @@ class PassInput:
     root: Path
     face_up: str          # "screen" or "back"
     name: str = ""
+    exclude: frozenset = frozenset()    # frames nothing may learn from (held out for evaluation, eval.heldout)
+    placement: str = "auto"             # "auto": flat on the floor or tilted (stand, leaning; anchor.placement); "flat": the old path only
 
     def __post_init__(self):
         self.root = Path(self.root)
         self.name = self.name or self.face_up
+        self.exclude = frozenset(int(i) for i in self.exclude)
 
 
 def _gid(p: int, i: int) -> int:
@@ -159,10 +162,50 @@ class PreparedPass:
     outline_S: np.ndarray
     outline_R: np.ndarray
     pose_mode: str = "board"
+    exclude: frozenset = frozenset()      # held-out frames (PassInput.exclude)
+    extra_faces: tuple = ()               # the other face, when this one recording filmed it too (other_face_seen)
 
     @property
     def charts(self) -> list[str]:
-        return ["screen", "frame"] if self.face_up == "screen" else ["back", "frame"]
+        return [self.face_up, *self.extra_faces, "frame"]
+
+
+def other_face_seen(model, cams: dict, T_cad_cam: dict[int, np.ndarray], face_up: str, iou_per_frame: dict | None = None,
+                    max_deg: float = 70.0, min_inside: float = 0.6, min_views: int = 12, min_share: float = 0.15,
+                    min_iou: float = 0.85) -> dict:
+    """Whether one recording filmed the face that was not up as well, well enough to texture and inspect
+    it: keyframes whose camera is on that face's side within ``max_deg`` of its normal, with at least
+    ``min_inside`` of its outline in the image, at least ``min_views`` of them and ``min_share`` of all
+    keyframes, and (with SAM 2 masks) the plate on the masks there with a median IoU of ``min_iou``.
+    A device on a stand filmed all round shows both faces (509e5ece1b: the screen side for about half
+    of the recording); one lying on the floor never does, and nothing changes for it."""
+    other = "screen" if face_up == "back" else "back"
+    n = np.array([0, 0, 1.0]) if other == "screen" else np.array([0, 0, -1.0])
+    z = model.z_front if other == "screen" else model.z_back
+    xy = np.asarray(model.outline_xy, float)
+    P = np.column_stack([xy[:: max(1, len(xy) // 48)], np.full(len(xy[:: max(1, len(xy) // 48)]), z)])
+    cos_max = np.cos(np.radians(max_deg))
+    views = []
+    for i, T in T_cad_cam.items():
+        c = T[:3, 3]
+        if (c @ n) / np.linalg.norm(c) < cos_max:
+            continue
+        Ti = inv_T(T)
+        pc = P @ Ti[:3, :3].T + Ti[:3, 3]
+        if (pc[:, 2] <= 1.0).any():
+            continue
+        cam = cams[i]
+        u = cam.fx * pc[:, 0] / pc[:, 2] + cam.cx
+        v = cam.fy * pc[:, 1] / pc[:, 2] + cam.cy
+        if np.mean((u >= 0) & (v >= 0) & (u < cam.width) & (v < cam.height)) >= min_inside:
+            views.append(int(i))
+    need = max(min_views, int(np.ceil(min_share * len(T_cad_cam))))
+    ious = [iou_per_frame[i] for i in views if iou_per_frame and i in iou_per_frame]
+    iou = float(np.median(ious)) if ious else None
+    use = len(views) >= need and (iou is None or iou >= min_iou)
+    why = (f"{len(views)} keyframes see it (need {need})" + (f", mask IoU p50 {iou:.3f} there (need {min_iou})" if iou is not None else ""))
+    return {"face": other, "use": bool(use), "views": len(views), "need": need, "mask_iou_p50": None if iou is None else round(iou, 4),
+            "why": why}
 
 
 Progress = Callable[[str, float, str], None]
@@ -220,19 +263,22 @@ class DecodedPass:
     undist: str
     located: object = None
     board_seen: bool | None = None
+    placement: dict | None = None
 
 
 _DECODED: dict = {}
 
 
 def decode_pass(p: PassInput, keyframes: int, board: BoardSpec) -> DecodedPass:
-    key = (str(Path(p.root).resolve()), int(keyframes))
+    key = (str(Path(p.root).resolve()), int(keyframes), hash(p.exclude))
     if key in _DECODED:
         return _DECODED[key]
     cap = read_stray(p.root)
-    log.info(f"[{p.name}] {len(cap)} frames {cap.width}x{cap.height}, video {cap.info.get('codec')} rot {cap.info.get('rotation')}")
+    log.info(f"[{p.name}] {len(cap)} frames {cap.width}x{cap.height}, video {cap.info.get('codec')} rot {cap.info.get('rotation')}"
+             + (f", {len(p.exclude)} held out" if p.exclude else ""))
     quality = {i: frame_quality(img) for i, img in iter_frames(p.root / "rgb.mp4", scale=0.5)}
-    keys = select_keyframes(quality, cap.timestamps[: len(quality)], target=keyframes)
+    # held-out frames are never keyframes: nothing downstream (poses, texture, evidence, spin) sees them
+    keys = select_keyframes({i: q for i, q in quality.items() if i not in p.exclude}, cap.timestamps[: len(quality)], target=keyframes)
     frames = dict(iter_frames(p.root / "rgb.mp4", keys))
     if len(frames) < 8:
         raise FlawmapError("VIDEO_SHORT", f"[{p.name}] only {len(frames)} keyframes decoded")
@@ -283,7 +329,18 @@ def locate_pass(p: PassInput, dec: DecodedPass):
         if cap.T_ark_cam is None:
             return None
         Tw = {i: T_W_ARK @ cap.T_ark_cam[i] for i in dec.frames}
-        loc = locate_device(cap, dec.frames, dec.cams, Tw, log=lambda m: log.info(f"[{p.name}]{m}"))
+        if dec.placement is None and p.placement != "flat":
+            from .anchor.placement import detect_placement
+
+            dec.placement = detect_placement(cap, sorted(dec.frames), Tw)
+            log.info(f"[{p.name}]  placement: {'tilted' if dec.placement.get('tilted') else 'flat'} "
+                     f"(aimed plane {dec.placement.get('tilt_deg')} deg from horizontal, {dec.placement.get('height_mm')} mm above the floor)")
+        if dec.placement and dec.placement.get("tilted"):
+            from .anchor.placement import locate_tilted
+
+            loc = locate_tilted(cap, dec.frames, dec.cams, Tw, p.face_up, dec.placement, log=lambda m: log.info(f"[{p.name}]{m}"))
+        else:
+            loc = locate_device(cap, dec.frames, dec.cams, Tw, log=lambda m: log.info(f"[{p.name}]{m}"))
         dec.located = loc if loc is not None else False
     return dec.located or None
 
@@ -296,7 +353,7 @@ def share_located(passes: list[PassInput], decs: list, locs: list) -> list:
     from .anchor.locate import fit_footprint, footprint
     from .poses.boardless import T_W_ARK
 
-    ok = [k for k, l in enumerate(locs) if l is not None and l.plate is not None]
+    ok = [k for k, l in enumerate(locs) if l is not None and l.plate is not None and getattr(l, "placement", "flat") != "tilted"]
     if len(ok) < 2:
         return locs
     tops = [locs[k].plate.top_height for k in ok if locs[k].plate.top_height is not None]
@@ -359,26 +416,72 @@ def prepare_stray_pass(p: PassInput, p_i: int, model, board: BoardSpec, keyframe
             raise FlawmapError("NO_POSE", f"[{p.name}] no ARKit trajectory and no board")
         loc = locate_pass(p, dec) if locate else None
         if loc is not None and loc.plate is None:
-            raise FlawmapError("DEVICE_NOT_FOUND", f"[{p.name}] SAM 2 found nothing phone- or tablet-sized ({loc.info.get('rounds')})")
+            raise FlawmapError("DEVICE_NOT_FOUND", f"[{p.name}] SAM 2 found nothing phone- or tablet-sized "
+                                                   f"({loc.info.get('rounds') or loc.info.get('error')})")
         lmasks = loc.masks if loc is not None else None
         if loc is not None and plate is None:
             plate = loc.plate
+    if not use_board and loc is not None and getattr(loc, "placement", "flat") == "tilted":
+        # standing or leaning (anchor.placement): the ARKit poses as they are, or the joint fit of pose and
+        # ARKit drift on the device's own plane (poses.boardless.tilted_poses), whichever puts the plate on
+        # the device masks better. All round the stand (509e5ece1b) the drift fit took the median mask IoU
+        # from 0.83 to 0.93; on the short leaning arc (6c417d24a0) it bent the poses to the plate's starting
+        # size and the size fit then stopped 3 mm short (278.3 x 212.7 against 281.7 x 216.5 without it)
+        from .anchor.placement import tilted_inits
+        from .poses.align import CapturePoses
+        from .poses.boardless import T_W_ARK, tilted_poses
+        from .segment.device_masks import iou_report
+
+        inits = tilted_inits(loc, model, p.face_up)
+        ids_all = sorted(frames)
+        raw_T = {i: T_W_ARK @ cap.T_ark_cam[i] for i in ids_all}
+        probe = _spread(ids_all, 16)
+        raw_reg = None
+        for T0 in inits:
+            r0 = register_device(model, {i: frames[i] for i in probe}, cams, raw_T, T0, searches=(24.0, 12.0, 6.0), masks=lmasks,
+                                 log=lambda m: None)
+            pv0 = list(r0.per_view.values())
+            med0 = float(np.median([v["median_px"] for v in pv0])) if pv0 else float("inf")
+            if raw_reg is None or med0 < raw_reg[0]:
+                raw_reg = (med0, r0.T_world_cad)
+        raw_iou = iou_report(model, lmasks, cams, {i: inv_T(raw_reg[1]) @ raw_T[i] for i in lmasks if i in raw_T})
+        bl = tilted_poses(cap, frames, cams, model, p.face_up, inits, inv_T(loc.T_plane_world), masks=lmasks, fit_plate=fit_plate,
+                          log=lambda m: log.info(f"[{p.name}]{m}"))
+        fit_iou = iou_report(model, lmasks, cams, {i: inv_T(bl.T_world_cad) @ bl.poses.T_world_cam[i] for i in lmasks})
+        use_fit = fit_iou["iou_p50"] >= raw_iou["iou_p50"] + 0.01
+        log.info(f"[{p.name}]  tilted: mask IoU p50 {raw_iou['iou_p50']} with the ARKit poses, {fit_iou['iou_p50']} with the drift fit; "
+                 f"{'drift fit' if use_fit else 'ARKit poses'} kept")
+        if not use_fit:
+            bl = type(bl)(CapturePoses(ids_all, raw_T, {i: "arkit" for i in ids_all}, {}, T_W_ARK,
+                                       {"mode": "tilted", "drift_fit_rejected": True}),
+                          raw_reg[1], {"mode": "tilted", "plate_scale": None, "drift_fit": "rejected"})
+        located_info = {**loc.info, "plane": loc.plane, "mask_iou_arkit": raw_iou["iou_p50"], "mask_iou_drift_fit": fit_iou["iou_p50"],
+                        "poses": "drift fit" if use_fit else "arkit"}
+    elif not use_board:
         bl = boardless_poses(cap, frames, cams, model, p.face_up, plate=plate, masks=lmasks,
                              z_floor=loc.z_floor if loc is not None else None, fit_plate=fit_plate,
                              log=lambda m: log.info(f"[{p.name}]{m}"))
+    if not use_board:
         plate_scale = bl.info.get("plate_scale")
         if plate_scale is not None:
             # the size estimate's passes: register the plate at the size the joint fit found
             from .anchor.template import template_spec
 
             sW, sL, sT = plate_scale
+            if not (0.5 <= sT <= 2.0):
+                log.warning(f"[{p.name}]  thickness factor {sT:.3f} from the joint fit is implausible; kept at 1")
+                sT = 1.0
             sp = model.spec
             model = build_device_model(template_spec(sp.length * sL, sp.width * sW, sp.thickness * sT,
                                                      sp.raw.get("corner_radius", 10.0) * min(sL, sW), edge_radius=sp.raw.get("edge_radius")))
             log.info(f"[{p.name}]  plate after the joint fit: {model.spec.length:.2f} x {model.spec.width:.2f} x "
                      f"{model.spec.thickness:.2f} mm")
-        poses, T_init, pose_ids, searches, pose_mode = bl.poses, bl.T_world_cad, bl.poses.frames, (3.0, 2.5), "boardless"
-        if loc is not None:
+        tilted = bl.info.get("mode") == "tilted"
+        rejected = bl.info.get("drift_fit") == "rejected"
+        poses, T_init, pose_ids, searches, pose_mode = (bl.poses, bl.T_world_cad, bl.poses.frames,
+                                                        (12.0, 6.0, 4.0, 3.0, 2.5) if rejected else (3.0, 2.5),
+                                                        ("arkit-tilted" if rejected else "tilted") if tilted else "boardless")
+        if loc is not None and not tilted:
             located_info = {**loc.info, "plate": loc.plate.info}
     colmap_info = None
     stages.at("register", p_i)
@@ -470,9 +573,16 @@ def prepare_stray_pass(p: PassInput, p_i: int, model, board: BoardSpec, keyframe
            "registration": {"T_world_cad": reg.T_world_cad, "rounds": reg.rounds, "median_px": med_px,
                             "median_mm": float(np.median([v["median_mm"] for v in pv])) if pv else None},
            "video": {k: v for k, v in cap.info.items() if k != "ffmpeg_banner"}}
+    # one recording all round a stand shows the other face too: texture and inspect it as well
+    other = other_face_seen(model, cams, Tcad, p.face_up, mask_iou.get("per_frame") if mask_iou else None)
+    rep["other_face"] = other
+    log.info(f"[{p.name}]  other face ({other['face']}): {'used' if other['use'] else 'not used'}, {other['why']}")
     prep = PreparedPass(p.name, p.face_up, g_frames, {_gid(p_i, i): cams[i] for i in poses.frames},
                         {_gid(p_i, i): Tcad[i] for i in poses.frames},
-                        {_gid(p_i, i): quality[i]["sharpness"] for i in poses.frames}, info, p.root / "rgb.mp4", rep, s_p, r_p, pose_mode)
+                        {_gid(p_i, i): quality[i]["sharpness"] for i in poses.frames}, info, p.root / "rgb.mp4", rep, s_p, r_p, pose_mode,
+                        p.exclude, (other["face"],) if other["use"] else ())
+    if p.exclude:
+        rep["held_out_frames"] = len(p.exclude)
     prep._poses, prep._reg = poses, reg
     prep._masks = {_gid(p_i, i): m for i, m in masks.items()} if masks else None
     prep._plate_scale = plate_scale
@@ -821,18 +931,21 @@ def estimate_device(passes: list[PassInput] | PassInput, board: BoardSpec, keyfr
         # screen the outline did not tell the top edge from the side wall, and that pass's factor gave a
         # 3.1 mm tablet (the back's: 5.08 mm, Apple 5.1; 2026-11-17)
         sW, sL = np.mean([sc[:2] for sc in scales], axis=0)
-        tops = [pp._plate_scale[2] for pp in sized if getattr(pp, "_plate_scale", None) is not None and getattr(pp, "_top_measured", False)]
+        tops = [pp._plate_scale[2] for pp in sized if getattr(pp, "_plate_scale", None) is not None and getattr(pp, "_top_measured", False)
+                and 0.5 <= pp._plate_scale[2] <= 2.0]
         sT = float(np.mean(tops)) if tops else 1.0
         spec_fit = template_spec(spec0.length * sL, spec0.width * sW, spec0.thickness * sT,
                                  spec0.raw.get("corner_radius", 10.0) * min(sL, sW))
         log.info(f"(size) joint fits: plate x {sL:.4f} long, x {sW:.4f} wide, x {sT:.3f} thick -> start "
                  f"{spec_fit.length:.2f} x {spec_fit.width:.2f} x {spec_fit.thickness:.2f} mm")
-    spec, _, fit = fit_dimensions_multi(spec_fit, data, log=lambda m: log.info(f"(size){m}"))
+    measured_top = any(pl.top_height and 2.0 < pl.top_height < 15.0 for pl in known)
+    spec, _, fit = fit_dimensions_multi(spec_fit, data, log=lambda m: log.info(f"(size){m}"), thickness_measured=measured_top)
     L, W, T = fit["size_mm"]
     hit = identify(L, W, tol_mm)
     rec = {"size_mm": [round(L, 2), round(W, 2), round(T, 2)], "corner_radius": fit["corner_radius"],
            "edge_radius": fit.get("edge_radius"), "passes": [pp.name for pp in sized], "passes_posed": used,
            "residual_px": None if fit["median_px"] is None else round(fit["median_px"], 3),
+           "thickness_from_outline": fit.get("thickness_from_outline"), "thickness_start_measured": measured_top,
            "start_mm": [round(spec0.length, 2), round(spec0.width, 2), round(spec0.thickness, 2)],
            "joint_fit_scale": [[round(float(x), 5) for x in sc] for sc in scales] if scales else None,
            "floor_plate": [pl.info if pl is not None else None for pl in plates],

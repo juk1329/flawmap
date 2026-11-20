@@ -90,11 +90,13 @@ def fit_dimensions(spec: DeviceSpec, frames: dict[int, np.ndarray], cams: dict, 
                 data.append((i, X[ok], n2[ok], tgt[ok], inv_T(T_world_cam[i])))
         return data
 
+    fit_T = [bool(fit_thickness)]
+
     def make_res(data, Tw_, with_scale):
         def res(x):
             xi = x[:6]
             sc = np.exp(np.r_[x[6:9], 0.0][:3]) if with_scale else np.ones(3)
-            if with_scale and not fit_thickness:
+            if with_scale and not fit_T[0]:
                 sc[2] = 1.0
             Tn = Tw_ @ se3_exp(xi)            # update in the device frame (rotation about the device centre)
             out = []
@@ -118,8 +120,13 @@ def fit_dimensions(spec: DeviceSpec, frames: dict[int, np.ndarray], cams: dict, 
         Tw = Tw @ se3_exp(x[:6])
         sc = np.exp(x[6:9])
         W, L = W * sc[0], L * sc[1]
-        if fit_thickness:
-            T = T * sc[2]
+        if fit_T[0]:
+            # as in fit_dimensions_multi: out of half to twice the start, the start is kept
+            T_new = T * sc[2]
+            if 0.5 * spec.thickness < T_new < 2.0 * spec.thickness:
+                T = float(T_new)
+            else:
+                T, fit_T[0] = float(spec.thickness), False
         r1 = res(x)
         rounds.append({"round": rnd, "search_px": S, "n_points": int(len(r0)), "median_px_before": float(np.median(np.abs(r0))),
                        "median_px_after": float(np.median(np.abs(r1))), "size_mm": [round(L, 3), round(W, 3), round(T, 3)]})
@@ -147,7 +154,7 @@ def fit_dimensions(spec: DeviceSpec, frames: dict[int, np.ndarray], cams: dict, 
 
 def fit_dimensions_multi(spec: DeviceSpec, passes: list[dict], searches=(10.0, 6.0, 4.0, 3.0, 2.5), fit_thickness: bool = True,
                          max_points_per_view: int = 400, huber_px: float = 1.0, radii=None, mask_weight: float = 0.0,
-                         mask_points_per_view: int = 120, mask_until_px: float = 6.0, edge_radii=(None, 0.5, 1.0, 1.5, 2.0), log=print):
+                         mask_points_per_view: int = 120, mask_until_px: float = 6.0, edge_radii=(None, 0.5, 1.0, 1.5, 2.0), log=print, thickness_measured: bool = True):
     """``fit_dimensions`` over several passes of the same device: one plate size (length, width,
     thickness, corner radius) shared by all, one pose per pass. ``passes``: dicts with ``frames``,
     ``cams``, ``T_world_cam``, ``T_world_cad``, ``views`` and optionally ``masks``. The masks choose
@@ -203,7 +210,7 @@ def fit_dimensions_multi(spec: DeviceSpec, passes: list[dict], searches=(10.0, 6
     def make_res(data, mdata, Tws_, with_scale, wm):
         def res(x):
             sc = np.exp(x[6 * P:6 * P + 3]) if with_scale else np.ones(3)
-            if with_scale and not fit_thickness:
+            if with_scale and not fit_T[0]:
                 sc = np.array([sc[0], sc[1], 1.0])
             Tn = [Tws_[k] @ se3_exp(x[6 * k:6 * k + 6]) for k in range(P)]
             out = []
@@ -218,6 +225,9 @@ def fit_dimensions_multi(spec: DeviceSpec, passes: list[dict], searches=(10.0, 6
 
     xs_pose = [1e-3] * 3 + [0.1] * 3
     edge = spec.raw.get("edge_radius")
+    T_start = float(spec.thickness)
+    thickness_clamped = [False]
+    fit_T = [bool(fit_thickness)]
 
     def size_rounds(srch, L, W, T, r, edge, Tws):
         for rnd, S in enumerate(srch):
@@ -236,8 +246,21 @@ def fit_dimensions_multi(spec: DeviceSpec, passes: list[dict], searches=(10.0, 6
             Tws = [Tws[k] @ se3_exp(x[6 * k:6 * k + 6]) for k in range(P)]
             sc = np.exp(x[6 * P:6 * P + 3])
             W, L = W * sc[0], L * sc[1]
-            if fit_thickness:
-                T = T * sc[2]
+            if fit_T[0]:
+                # the outline barely constrains the thickness when the side band is never seen (a capture
+                # filmed from above only, cc53da7c23, 2026-11-18: it ran to 0 mm and registration failed).
+                # When it runs out of half to twice the start, the start is kept for the rest of the fit:
+                # it is the capture's own measurement (the top face's height above the floor; cc53: 4.84 mm,
+                # where the outline went to the 2.42 mm bound)
+                # Without a measured start (a generic plate: the device stood or leaned, nothing measured its
+                # top face's height), the last thickness inside the band is kept instead (6c417d24a0: 7.6 ->
+                # 6.1 ... 4.2 mm, then out with a 0.5 mm edge radius; the iPad is 5.1 mm)
+                T_new = T * sc[2]
+                if not (0.5 * T_start < T_new < 2.0 * T_start):
+                    thickness_clamped[0], fit_T[0] = True, False
+                    T = T_start if thickness_measured else T
+                else:
+                    T = float(T_new)
             r1 = res(x)[:n_e]
             rounds.append({"round": len(rounds), "search_px": S, "n_points": int(n_e), "mask_points": int(sum(len(d[2]) for d in mdata)),
                            "mask_weight": round(wm, 3), "median_px_before": float(np.median(np.abs(r0))),
@@ -304,7 +327,11 @@ def fit_dimensions_multi(spec: DeviceSpec, passes: list[dict], searches=(10.0, 6
         log(f"  template shape {it}: corner radius {r:.1f}, edge radius {edge}, size {L:.2f} x {W:.2f} x {T:.2f}")
     out = template_spec(L, W, T, r, edge_radius=edge)
     info = {"rounds": rounds, "size_mm": [L, W, T], "corner_radius": r, "edge_radius": edge, "radius_scores": radius_scores,
-            "median_px": best_e[3] if best_e else (best[3] if best else None), "passes": P}
+            "median_px": best_e[3] if best_e else (best[3] if best else None), "passes": P,
+            "thickness_from_outline": not thickness_clamped[0]}
+    if thickness_clamped[0]:
+        log(f"  template: the outline did not fix the thickness (left half to twice the start {T_start:.2f} mm); kept "
+            + (f"the measured start" if thickness_measured else f"the last value inside, {T:.2f} mm"))
     log(f"  template ({P} passes): {L:.2f} x {W:.2f} x {T:.2f}, corner radius {r:.1f}, edge radius {edge}, residual {info['median_px']}")
     return out, Tws, info
 
@@ -316,7 +343,11 @@ def model_of_run(rep: dict):
     from .parametric import DeviceSpec, build_device_model
 
     if rep.get("device") == "template":
-        est = rep["processing"]["device_estimate"]
+        est = rep.get("processing", {}).get("device_estimate")
+        if est is None:       # a public video (pipeline.prepare_uco3d_pass): the fit scaled to the assumed width
+            t = rep["passes"][0]["template"]
+            k = t["assumed_width_mm"] / t["size_mm"][1]
+            return build_device_model(template_spec(t["size_mm"][0] * k, t["assumed_width_mm"], t["size_mm"][2] * k, t["corner_radius"] * k))
         return build_device_model(template_spec(*est["size_mm"], est["corner_radius"], edge_radius=est.get("edge_radius")))
     return build_device_model(DeviceSpec.by_slug(rep["device"]))
 
